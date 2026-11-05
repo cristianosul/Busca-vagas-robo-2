@@ -3,7 +3,7 @@ import os
 import sqlite3
 from pathlib import Path
 from datetime import datetime, timezone
-from app.models import CandidateIn
+from app.models import CandidateIn, CandidateVerification
 from app.scoring import score_candidate
 
 DB_PATH = Path(os.getenv("DATABASE_PATH", "./data/staging.db"))
@@ -38,8 +38,14 @@ def init_db():
         """)
 
 
-def save_candidate(candidate: CandidateIn):
-    score, status, reasons = score_candidate(candidate)
+def save_candidate(
+    candidate: CandidateIn,
+    verification: CandidateVerification | None = None,
+):
+    score, status, reasons = score_candidate(
+    candidate,
+    verification,
+    )
     payload = candidate.model_dump(mode="json")
     created_at = datetime.now(timezone.utc).isoformat()
 
