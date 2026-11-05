@@ -1,53 +1,90 @@
-from app.models import CandidateIn
+
+from datetime import datetime, timezone
+
+from app.models import CandidateIn, CandidateVerification
 
 
-def score_candidate(candidate: CandidateIn) -> tuple[int, str, list[str]]:
-    """Pontua apenas evidências recebidas; não presume que uma URL é válida."""
+def score_candidate(
+    candidate: CandidateIn,
+    verification: CandidateVerification | None = None,
+) -> tuple[int, str, list[str]]:
+
+    verification = verification or CandidateVerification()
+
     score = 0
     reasons: list[str] = []
 
-    if candidate.company_verified:
-        score += 25
-        reasons.append("Empresa identificada e verificada (+25)")
-    else:
-        reasons.append("Empresa ainda não verificada")
+    checks = [
+        (
+            verification.company_verified,
+            25,
+            "Empresa identificada e verificada",
+            "Empresa ainda não verificada",
+        ),
+        (
+            verification.original_page_verified,
+            25,
+            "Página original da vaga confirmada",
+            "Página original da vaga não confirmada",
+        ),
+        (
+            verification.application_link_verified
+            and candidate.application_url is not None,
+            20,
+            "Link de candidatura verificado",
+            "Link de candidatura não verificado",
+        ),
+        (
+            verification.job_content_verified,
+            15,
+            "Conteúdo da oportunidade consistente",
+            "Conteúdo da oportunidade ainda não verificado",
+        ),
+        (
+            verification.date_verified,
+            15,
+            "Data e validade verificadas",
+            "Data e validade ainda não verificadas",
+        ),
+    ]
 
-    if candidate.original_page_verified:
-        score += 25
-        reasons.append("Página original da vaga confirmada (+25)")
-    else:
-        reasons.append("Página original da vaga não confirmada")
+    for verified, points, success, failure in checks:
+        if verified:
+            score += points
+            reasons.append(f"{success} (+{points})")
+        else:
+            reasons.append(failure)
 
-    if candidate.application_link_verified and candidate.application_url:
-        score += 20
-        reasons.append("Link de candidatura verificado (+20)")
-    else:
-        reasons.append("Link de candidatura não verificado")
+    now = datetime.now(timezone.utc)
+    expired = False
 
-    if candidate.job_content_verified:
-        score += 15
-        reasons.append("Conteúdo da oportunidade consistente (+15)")
-    else:
-        reasons.append("Conteúdo da oportunidade ainda não verificado")
+    if candidate.valid_through is not None:
+        expiry = candidate.valid_through
 
-    if candidate.date_verified:
-        score += 15
-        reasons.append("Data/validade verificadas (+15)")
-    else:
-        reasons.append("Data/validade ainda não verificadas")
+        if expiry.tzinfo is None:
+            expiry = expiry.replace(tzinfo=timezone.utc)
 
-    # Travas obrigatórias: pontuação alta nunca substitui evidências essenciais.
+        expired = expiry < now
+
+    if expired:
+        reasons.append("Vaga vencida: validade já ultrapassada")
+        return score, "rejected", reasons
+
     mandatory_ok = (
-        candidate.company_verified
-        and candidate.original_page_verified
-        and candidate.application_link_verified
+        verification.company_verified
+        and verification.original_page_verified
+        and verification.application_link_verified
         and candidate.application_url is not None
-        and candidate.job_content_verified
+        and verification.job_content_verified
+        and verification.date_verified
+        and candidate.valid_through is not None
     )
 
     if not mandatory_ok:
         status = "review" if score >= 60 else "rejected"
-        reasons.append("Não aprovada: falta pelo menos uma verificação obrigatória")
+        reasons.append(
+            "Não aprovada: faltam verificações obrigatórias"
+        )
     elif score >= 85:
         status = "approved"
     elif score >= 60:
