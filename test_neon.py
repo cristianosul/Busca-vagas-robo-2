@@ -1,11 +1,7 @@
 
 from app.models import CandidateIn
-from app.repository import (
-    connect,
-    execute,
-    normalize_job_url,
-    save_candidate,
-)
+from app.repository import connect, execute, save_candidate
+
 
 TEST_URL = "https://example.com/rob2-neon-integration-test-20261105"
 
@@ -22,22 +18,22 @@ def main():
         application_url=None,
     )
 
-    normalized_url = normalize_job_url(TEST_URL)
-
     try:
-        save_candidate(candidate)
-        save_candidate(candidate)
+        # Insere a vaga fictícia duas vezes.
+        first = save_candidate(candidate)
+        second = save_candidate(candidate)
 
         with connect() as conn:
             row = execute(
                 conn,
                 """
-                SELECT COUNT(*) AS total, MIN(score) AS score,
+                SELECT COUNT(*) AS total,
+                       MIN(score) AS score,
                        MIN(status) AS status
                 FROM candidates
                 WHERE normalized_url = ?
                 """,
-                (normalized_url,),
+                (TEST_URL,),
             ).fetchone()
 
         assert row["total"] == 1, "Falha na deduplicação"
@@ -50,11 +46,12 @@ def main():
         print("TESTE OK: vaga permaneceu em revisão")
 
     finally:
+        # Remove somente a vaga fictícia deste teste.
         with connect() as conn:
             execute(
                 conn,
                 "DELETE FROM candidates WHERE normalized_url = ?",
-                (normalized_url,),
+                (TEST_URL,),
             )
 
         print("LIMPEZA OK: vaga fictícia removida")
