@@ -1,95 +1,40 @@
-
-from datetime import datetime, timezone
-
-from app.models import CandidateIn, CandidateVerification
+from app.models import CandidateEvidence
 
 
-def score_candidate(
-    candidate: CandidateIn,
-    verification: CandidateVerification | None = None,
-) -> tuple[int, str, list[str]]:
+WEIGHTS = {
+    "company_verified": 25,
+    "original_page_verified": 25,
+    "application_link_verified": 20,
+    "job_content_verified": 15,
+    "date_verified": 15,
+}
 
-    verification = verification or CandidateVerification()
 
+def score_candidate(evidence: CandidateEvidence) -> tuple[int, str, list[str]]:
+    """Só aprova com todas as evidências obrigatórias; ausência de prova vira revisão."""
     score = 0
     reasons: list[str] = []
 
-    checks = [
-        (
-            verification.company_verified,
-            25,
-            "Empresa identificada e verificada",
-            "Empresa ainda não verificada",
-        ),
-        (
-            verification.original_page_verified,
-            25,
-            "Página original da vaga confirmada",
-            "Página original da vaga não confirmada",
-        ),
-        (
-            verification.application_link_verified
-            and candidate.application_url is not None,
-            20,
-            "Link de candidatura verificado",
-            "Link de candidatura não verificado",
-        ),
-        (
-            verification.job_content_verified,
-            15,
-            "Conteúdo da oportunidade consistente",
-            "Conteúdo da oportunidade ainda não verificado",
-        ),
-        (
-            verification.date_verified,
-            15,
-            "Data e validade verificadas",
-            "Data e validade ainda não verificadas",
-        ),
-    ]
+    labels = {
+        "company_verified": "Empresa identificada e verificada",
+        "original_page_verified": "Página original da vaga confirmada",
+        "application_link_verified": "Link de candidatura verificado",
+        "job_content_verified": "Conteúdo da oportunidade consistente",
+        "date_verified": "Data e validade verificadas",
+    }
 
-    for verified, points, success, failure in checks:
-        if verified:
-            score += points
-            reasons.append(f"{success} (+{points})")
+    for field, weight in WEIGHTS.items():
+        if getattr(evidence, field):
+            score += weight
+            reasons.append(f"{labels[field]} (+{weight})")
         else:
-            reasons.append(failure)
+            reasons.append(f"{labels[field]} ainda não verificada")
 
-    now = datetime.now(timezone.utc)
-    expired = False
+    if evidence.rejected_reason:
+        return score, "rejected", reasons + [f"Rejeitada: {evidence.rejected_reason}"]
 
-    if candidate.valid_through is not None:
-        expiry = candidate.valid_through
+    mandatory_ok = all(getattr(evidence, field) for field in WEIGHTS)
+    if mandatory_ok and score >= 85:
+        return score, "approved", reasons + ["Aprovada: todas as verificações obrigatórias foram concluídas"]
 
-        if expiry.tzinfo is None:
-            expiry = expiry.replace(tzinfo=timezone.utc)
-
-        expired = expiry < now
-
-    if expired:
-        reasons.append("Vaga vencida: validade já ultrapassada")
-        return score, "rejected", reasons
-
-    mandatory_ok = (
-        verification.company_verified
-        and verification.original_page_verified
-        and verification.application_link_verified
-        and candidate.application_url is not None
-        and verification.job_content_verified
-        and verification.date_verified
-        and candidate.valid_through is not None
-    )
-
-    if not mandatory_ok:
-        status = "review" if score >= 60 else "rejected"
-        reasons.append(
-            "Não aprovada: faltam verificações obrigatórias"
-        )
-    elif score >= 85:
-        status = "approved"
-    elif score >= 60:
-        status = "review"
-    else:
-        status = "rejected"
-
-    return score, status, reasons
+    return score, "review", reasons + ["Em revisão: faltam evidências obrigatórias; não publicar"]
