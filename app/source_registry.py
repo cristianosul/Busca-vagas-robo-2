@@ -1,7 +1,13 @@
 
 from dataclasses import dataclass
 from typing import Literal
-from urllib.parse import urlparse
+
+from app.models import SourceCreate
+from app.repository import (
+    get_source_record,
+    list_sources,
+    save_source,
+)
 
 
 SourceType = Literal[
@@ -38,63 +44,50 @@ class Source:
     notes: str | None = None
 
 
-SOURCES: list[Source] = []
+def _to_model(source: Source) -> SourceCreate:
+    return SourceCreate(
+        source_id=source.source_id,
+        name=source.name,
+        source_type=source.source_type,
+        base_url=source.base_url,
+        authorization=source.authorization,
+        enabled=source.enabled,
+        notes=source.notes,
+    )
 
-VALID_SOURCE_TYPES = {
-    "company", "greenhouse", "lever", "ashby",
-    "smartrecruiters", "gupy", "job_portal",
-    "regional", "municipal", "sitemap",
-    "structured_data",
-}
 
-VALID_AUTHORIZATIONS = {
-    "official_public_api",
-    "official_public_page",
-    "public_sitemap",
-    "public_structured_data",
-    "written_permission",
-}
+def _to_source(record: dict) -> Source:
+    return Source(
+        source_id=record["source_id"],
+        name=record["name"],
+        source_type=record["source_type"],
+        base_url=record["base_url"],
+        authorization=record["authorization"],
+        enabled=bool(record["enabled"]),
+        notes=record.get("notes"),
+    )
 
 
 def validate_source(source: Source) -> None:
-    if not source.source_id.strip():
-        raise ValueError("A fonte precisa de um identificador.")
-
-    if not source.name.strip():
-        raise ValueError("A fonte precisa de um nome.")
-
-    if source.source_type not in VALID_SOURCE_TYPES:
-        raise ValueError("Tipo de fonte não reconhecido.")
-
-    if source.authorization not in VALID_AUTHORIZATIONS:
-        raise ValueError("Tipo de autorização não reconhecido.")
-
-    parsed = urlparse(source.base_url)
-
-    if parsed.scheme != "https" or not parsed.netloc:
-        raise ValueError("A fonte precisa utilizar uma URL HTTPS válida.")
+    _to_model(source)
 
 
 def get_sources(enabled_only: bool = False) -> list[Source]:
-    if enabled_only:
-        return [source for source in SOURCES if source.enabled]
-
-    return list(SOURCES)
+    records = list_sources(enabled_only=enabled_only)
+    return [_to_source(record) for record in records]
 
 
 def get_source(source_id: str) -> Source | None:
-    for source in SOURCES:
-        if source.source_id == source_id:
-            return source
+    record = get_source_record(source_id)
 
-    return None
+    if record is None:
+        return None
+
+    return _to_source(record)
 
 
 def register_source(source: Source) -> Source:
-    validate_source(source)
+    model = _to_model(source)
+    save_source(model)
 
-    if get_source(source.source_id) is not None:
-        raise ValueError("Já existe uma fonte com esse identificador.")
-
-    SOURCES.append(source)
-    return source
+    return get_source(source.source_id) or source
