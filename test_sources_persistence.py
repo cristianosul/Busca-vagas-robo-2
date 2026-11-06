@@ -10,9 +10,9 @@ def isolated_db(tmp_path, monkeypatch):
     # Impede conexão com o Neon durante estes testes.
     monkeypatch.setattr(repository, "DATABASE_URL", "")
     monkeypatch.setattr(
-        repository,
-        "DB_PATH",
-        str(tmp_path / "test_sources.db"),
+      repository,
+      "DB_PATH",
+      tmp_path / "test_sources.db",
     )
 
     repository.init_db()
