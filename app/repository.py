@@ -248,10 +248,24 @@ def init_db():
             )
 
         conn.execute("""
+            DELETE FROM candidates
+            WHERE normalized_url IS NOT NULL
+              AND normalized_url != ''
+              AND id NOT IN (
+                  SELECT MIN(id)
+                  FROM candidates
+                  WHERE normalized_url IS NOT NULL
+                    AND normalized_url != ''
+                  GROUP BY normalized_url
+              )
+        """)
+
+        conn.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS
             ux_candidates_normalized_url
             ON candidates(normalized_url)
         """)
+        
 
         conn.execute("""
             CREATE INDEX IF NOT EXISTS
