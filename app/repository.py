@@ -2,17 +2,25 @@
 import json
 import os
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from app.models import CandidateEvidence, CandidateIn
+from app.models import CandidateEvidence, CandidateIn, SourceCreate
 from app.scoring import score_candidate
+
 
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 DB_PATH = Path(os.getenv("DATABASE_PATH", "./data/staging.db"))
 
-TRACKING_KEYS = {"fbclid", "gclid", "dclid", "msclkid", "ref", "referrer"}
+TRACKING_KEYS = {
+    "fbclid", "gclid", "dclid", "msclkid", "ref", "referrer"
+}
+
+
+def utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def normalize_job_url(value: str) -> str:
@@ -21,10 +29,17 @@ def normalize_job_url(value: str) -> str:
     scheme = parts.scheme.lower()
     hostname = (parts.hostname or "").lower()
 
-    if not hostname:
-        raise ValueError("URL original sem hostname válido")
+    if scheme not in {"http", "https"} or not hostname:
+        raise ValueError("URL original sem hostname válido.")
 
-    port = parts.port
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError("Porta inválida na URL original.") from exc
+
+    if ":" in hostname:
+        hostname = f"[{hostname}]"
+
     if port and not (
         (scheme == "https" and port == 443)
         or (scheme == "http" and port == 80)
@@ -38,18 +53,22 @@ def normalize_job_url(value: str) -> str:
         path = path.rstrip("/")
 
     query_items = []
+
     for key, val in parse_qsl(parts.query, keep_blank_values=True):
         lowered = key.lower()
+
         if lowered.startswith("utm_") or lowered in TRACKING_KEYS:
             continue
+
         query_items.append((key, val))
 
     query = urlencode(sorted(query_items))
+
     return urlunsplit((scheme, netloc, path, query, ""))
 
 
 def connect():
-    """Conecta ao Neon quando DATABASE_URL existir; caso contrário, usa SQLite."""
+    """Conecta ao Neon ou ao SQLite local."""
     if DATABASE_URL:
         try:
             import psycopg
@@ -67,22 +86,41 @@ def connect():
         )
 
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
     conn = sqlite3.connect(DB_PATH, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 30000")
     conn.execute("PRAGMA foreign_keys = ON")
+
     return conn
 
 
+@contextmanager
+def db_session(immediate: bool = False):
+    """Garante transação e fechamento da conexão."""
+    conn = connect()
+
+    try:
+        if not DATABASE_URL and immediate:
+            conn.execute("BEGIN IMMEDIATE")
+
+        with conn:
+            yield conn
+    finally:
+        conn.close()
+
+
 def execute(conn, sql, params=()):
-    """Mantém compatibilidade dos parâmetros entre SQLite e PostgreSQL."""
+    """Compatibiliza parâmetros SQLite e PostgreSQL."""
     if DATABASE_URL:
         sql = sql.replace("?", "%s")
+
     return conn.execute(sql, params)
 
 
 def init_db():
-    with connect() as conn:
+    """Cria e atualiza as tabelas do Robô 2."""
+    with db_session() as conn:
         if DATABASE_URL:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS candidates (
@@ -104,6 +142,20 @@ def init_db():
                     created_at TEXT NOT NULL
                 )
             """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sources (
+                    source_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    base_url TEXT NOT NULL,
+                    authorization TEXT NOT NULL,
+                    enabled BOOLEAN NOT NULL DEFAULT FALSE,
+                    notes TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+            """)
         else:
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS candidates (
@@ -123,6 +175,20 @@ def init_db():
                     reasons_json TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
+                )
+            """)
+
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS sources (
+                    source_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    source_type TEXT NOT NULL,
+                    base_url TEXT NOT NULL,
+                    authorization TEXT NOT NULL,
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    notes TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
                 )
             """)
 
@@ -165,13 +231,19 @@ def init_db():
             normalized = normalize_job_url(row["original_job_url"])
 
             if normalized in seen:
-                normalized = f"{normalized}#legacy-duplicate-{row['id']}"
+                normalized = (
+                    f"{normalized}#legacy-duplicate-{row['id']}"
+                )
 
             seen.add(normalized)
 
             execute(
                 conn,
-                "UPDATE candidates SET normalized_url = ? WHERE id = ?",
+                """
+                UPDATE candidates
+                SET normalized_url = ?
+                WHERE id = ?
+                """,
                 (normalized, row["id"]),
             )
 
@@ -181,23 +253,28 @@ def init_db():
             ON candidates(normalized_url)
         """)
 
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS
+            ix_sources_enabled
+            ON sources(enabled)
+        """)
+
 
 def save_candidate(
     candidate: CandidateIn,
-    evidence: CandidateEvidence | None = None
+    evidence: CandidateEvidence | None = None,
 ):
     evidence = evidence or CandidateEvidence()
+
     score, status, reasons = score_candidate(evidence)
 
     payload = candidate.model_dump(mode="json")
-    created_at = datetime.now(timezone.utc).isoformat()
+    created_at = utc_now()
+
     original_url = str(candidate.original_job_url)
     normalized_url = normalize_job_url(original_url)
 
-    with connect() as conn:
-        if not DATABASE_URL:
-            conn.execute("BEGIN IMMEDIATE")
-
+    with db_session(immediate=True) as conn:
         cur = execute(
             conn,
             """
@@ -261,20 +338,137 @@ def save_candidate(
                 ],
             }
 
-        raise RuntimeError("Não foi possível salvar ou localizar a oportunidade.")
+        raise RuntimeError(
+            "Não foi possível salvar ou localizar a oportunidade."
+        )
+
+
+def save_source(source: SourceCreate):
+    """Armazena uma fonte de forma permanente."""
+    data = source.model_dump(mode="json")
+    now = utc_now()
+
+    with db_session(immediate=True) as conn:
+        cur = execute(
+            conn,
+            """
+            INSERT INTO sources (
+                source_id, name, source_type, base_url,
+                authorization, enabled, notes, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_id) DO NOTHING
+            RETURNING source_id
+            """,
+            (
+                data["source_id"],
+                data["name"],
+                data["source_type"],
+                str(data["base_url"]),
+                data["authorization"],
+                data["enabled"],
+                data.get("notes"),
+                now,
+                now,
+            ),
+        )
+
+        inserted = cur.fetchone()
+
+        if not inserted:
+            raise ValueError(
+                "Já existe uma fonte com esse identificador."
+            )
+
+    return get_source_record(data["source_id"])
+
+
+def get_source_record(source_id: str):
+    """Consulta uma fonte pelo identificador."""
+    with db_session() as conn:
+        row = execute(
+            conn,
+            """
+            SELECT *
+            FROM sources
+            WHERE source_id = ?
+            """,
+            (source_id,),
+        ).fetchone()
+
+    if not row:
+        return None
+
+    return dict(row)
+
+
+def list_sources(enabled_only: bool = False, limit: int = 500):
+    """Lista fontes cadastradas."""
+    limit = max(1, min(int(limit), 500))
+
+    with db_session() as conn:
+        if enabled_only:
+            rows = execute(
+                conn,
+                """
+                SELECT *
+                FROM sources
+                WHERE enabled = ?
+                ORDER BY name ASC
+                LIMIT ?
+                """,
+                (True, limit),
+            ).fetchall()
+        else:
+            rows = execute(
+                conn,
+                """
+                SELECT *
+                FROM sources
+                ORDER BY name ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+    return [dict(row) for row in rows]
+
+
+def update_source_status(source_id: str, enabled: bool):
+    """Ativa ou desativa uma fonte cadastrada."""
+    with db_session(immediate=True) as conn:
+        cur = execute(
+            conn,
+            """
+            UPDATE sources
+            SET enabled = ?, updated_at = ?
+            WHERE source_id = ?
+            RETURNING source_id
+            """,
+            (enabled, utc_now(), source_id),
+        )
+
+        updated = cur.fetchone()
+
+    if not updated:
+        return None
+
+    return get_source_record(source_id)
 
 
 def list_candidates(status: str | None = None, limit: int = 50):
     limit = max(1, min(int(limit), 500))
 
-    with connect() as conn:
+    with db_session() as conn:
         if status:
             rows = execute(
                 conn,
                 """
-                SELECT * FROM candidates
+                SELECT *
+                FROM candidates
                 WHERE status = ?
-                ORDER BY id DESC LIMIT ?
+                ORDER BY id DESC
+                LIMIT ?
                 """,
                 (status, limit),
             ).fetchall()
@@ -282,8 +476,10 @@ def list_candidates(status: str | None = None, limit: int = 50):
             rows = execute(
                 conn,
                 """
-                SELECT * FROM candidates
-                ORDER BY id DESC LIMIT ?
+                SELECT *
+                FROM candidates
+                ORDER BY id DESC
+                LIMIT ?
                 """,
                 (limit,),
             ).fetchall()
