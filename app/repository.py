@@ -368,7 +368,7 @@ def save_source(source: SourceCreate):
             """
             INSERT INTO sources (
                 source_id, name, source_type, base_url,
-                authorization, enabled, notes, created_at, updated_at
+                "authorization", enabled, notes, created_at, updated_at
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_id) DO NOTHING
