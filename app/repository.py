@@ -184,7 +184,7 @@ def init_db():
                     name TEXT NOT NULL,
                     source_type TEXT NOT NULL,
                     base_url TEXT NOT NULL,
-                    authorization TEXT NOT NULL,
+                    "authorization" TEXT NOT NULL,
                     enabled INTEGER NOT NULL DEFAULT 0,
                     notes TEXT,
                     created_at TEXT NOT NULL,
