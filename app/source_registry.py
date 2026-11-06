@@ -38,9 +38,22 @@ class Source:
     notes: str | None = None
 
 
-# Nenhuma fonte é ativada nesta etapa.
-# Cada fonte deverá ser cadastrada e avaliada antes da pesquisa.
-SOURCES: tuple[Source, ...] = ()
+SOURCES: list[Source] = []
+
+VALID_SOURCE_TYPES = {
+    "company", "greenhouse", "lever", "ashby",
+    "smartrecruiters", "gupy", "job_portal",
+    "regional", "municipal", "sitemap",
+    "structured_data",
+}
+
+VALID_AUTHORIZATIONS = {
+    "official_public_api",
+    "official_public_page",
+    "public_sitemap",
+    "public_structured_data",
+    "written_permission",
+}
 
 
 def validate_source(source: Source) -> None:
@@ -50,32 +63,23 @@ def validate_source(source: Source) -> None:
     if not source.name.strip():
         raise ValueError("A fonte precisa de um nome.")
 
+    if source.source_type not in VALID_SOURCE_TYPES:
+        raise ValueError("Tipo de fonte não reconhecido.")
+
+    if source.authorization not in VALID_AUTHORIZATIONS:
+        raise ValueError("Tipo de autorização não reconhecido.")
+
     parsed = urlparse(source.base_url)
 
     if parsed.scheme != "https" or not parsed.netloc:
         raise ValueError("A fonte precisa utilizar uma URL HTTPS válida.")
 
-    if source.authorization not in (
-        "official_public_api",
-        "official_public_page",
-        "public_sitemap",
-        "public_structured_data",
-        "written_permission",
-    ):
-        raise ValueError("Tipo de autorização não reconhecido.")
-
 
 def get_sources(enabled_only: bool = False) -> list[Source]:
-    sources = list(SOURCES)
-
     if enabled_only:
-        return [
-            source
-            for source in sources
-            if source.enabled
-        ]
+        return [source for source in SOURCES if source.enabled]
 
-    return sources
+    return list(SOURCES)
 
 
 def get_source(source_id: str) -> Source | None:
@@ -86,10 +90,11 @@ def get_source(source_id: str) -> Source | None:
     return None
 
 
-def register_source(source: Source) -> tuple[Source, ...]:
+def register_source(source: Source) -> Source:
     validate_source(source)
 
-    if any(item.source_id == source.source_id for item in SOURCES):
+    if get_source(source.source_id) is not None:
         raise ValueError("Já existe uma fonte com esse identificador.")
 
-    return SOURCES + (source,)
+    SOURCES.append(source)
+    return source
