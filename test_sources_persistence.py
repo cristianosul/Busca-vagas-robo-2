@@ -1,14 +1,21 @@
 
 import pytest
 
+import app.repository as repository
 from app.models import SourceCreate
-from app.repository import (
-    init_db,
-    save_source,
-    get_source_record,
-    list_sources,
-    update_source_status,
-)
+
+
+@pytest.fixture
+def isolated_db(tmp_path, monkeypatch):
+    # Impede conexão com o Neon durante estes testes.
+    monkeypatch.setattr(repository, "DATABASE_URL", "")
+    monkeypatch.setattr(
+        repository,
+        "DB_PATH",
+        str(tmp_path / "test_sources.db"),
+    )
+
+    repository.init_db()
 
 
 def make_source(source_id="empresa-teste"):
@@ -22,51 +29,46 @@ def make_source(source_id="empresa-teste"):
     )
 
 
-def test_source_persistence_and_status():
-    init_db()
-
+def test_source_persistence_and_status(isolated_db):
     source = make_source()
 
-    try:
-        saved = save_source(source)
-    except ValueError:
-        # Permite que o teste seja repetido sem deixar duplicatas.
-        existing = get_source_record(source.source_id)
-        assert existing is not None
-        saved = existing
-
+    saved = repository.save_source(source)
     assert saved["source_id"] == "empresa-teste"
 
-    found = get_source_record("empresa-teste")
+    found = repository.get_source_record("empresa-teste")
     assert found is not None
     assert found["name"] == "Empresa de Teste"
 
-    sources = list_sources(enabled_only=True)
+    sources = repository.list_sources(enabled_only=True)
     assert any(item["source_id"] == "empresa-teste" for item in sources)
 
-    updated = update_source_status("empresa-teste", False)
+    updated = repository.update_source_status("empresa-teste", False)
     assert updated is not None
-    assert updated["enabled"] is False
+    assert updated["enabled"] in (False, 0)
 
-    disabled_sources = list_sources(enabled_only=True)
+    enabled_sources = repository.list_sources(enabled_only=True)
     assert not any(
         item["source_id"] == "empresa-teste"
-        for item in disabled_sources
+        for item in enabled_sources
     )
 
 
-def test_duplicate_source_is_rejected():
-    init_db()
-
+def test_duplicate_source_is_rejected(isolated_db):
     source = make_source("empresa-duplicada")
-    save_source(source)
+
+    repository.save_source(source)
 
     with pytest.raises(ValueError):
-        save_source(source)
+        repository.save_source(source)
 
 
-def test_missing_source_returns_none():
-    init_db()
+def test_missing_source_returns_none(isolated_db):
+    assert repository.get_source_record("fonte-inexistente") is None
 
-    assert get_source_record("fonte-que-nao-existe") is None
-    assert update_source_status("fonte-que-nao-existe", False) is None
+    assert (
+        repository.update_source_status(
+            "fonte-inexistente",
+            False,
+        )
+        is None
+    )
