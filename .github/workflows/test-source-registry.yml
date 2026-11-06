@@ -1,0 +1,22 @@
+
+name: Testar cadastro de fontes do Robo 2
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-sources:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Testar cadastro de fontes
+        run: |
+          python test_source_registry.py
