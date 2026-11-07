@@ -99,7 +99,7 @@ def test_source_status_persists_after_new_database_connection(
     )
 
     assert updated is not None
-    assert updated["enabled"] is False
+    assert not updated["enabled"]
 
     # Consulta novamente usando uma nova conexão.
     found = get_source("empresa-persistente")
