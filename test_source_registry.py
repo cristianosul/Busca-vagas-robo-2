@@ -1,6 +1,7 @@
 
 import pytest
 
+from app.repository import update_source_status
 from app import repository
 from app.source_registry import (
     Source,
@@ -83,3 +84,34 @@ def test_validate_source_rejects_http_url():
 
     with pytest.raises(ValueError):
         validate_source(source)
+
+
+def test_source_status_persists_after_new_database_connection(
+    isolated_database,
+):
+    source = make_source("empresa-persistente", enabled=True)
+    register_source(source)
+
+    # Desativa a fonte.
+    updated = update_source_status(
+        "empresa-persistente",
+        False,
+    )
+
+    assert updated is not None
+    assert updated["enabled"] is False
+
+    # Consulta novamente usando uma nova conexão.
+    found = get_source("empresa-persistente")
+
+    assert found is not None
+    assert found.enabled is False
+
+    # Reativa e consulta novamente.
+    update_source_status("empresa-persistente", True)
+
+    found_again = get_source("empresa-persistente")
+
+    assert found_again is not None
+    assert found_again.enabled is True
+    
