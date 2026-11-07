@@ -27,5 +27,5 @@ jobs:
         env:
           DATABASE_URL: ""
         run: |
-          python -m pytest -q tests/test_source_registry.py
+          python -m pytest -q test_source_registry.py
           
