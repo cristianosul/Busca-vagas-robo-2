@@ -55,17 +55,22 @@ def insert_candidate(conn, normalized_url):
     )
 
 
+
 def test_migration_does_not_silently_delete_existing_duplicates(
     isolated_db,
 ):
     normalized_url = "https://example.com/jobs/123"
 
     with repository.connect() as conn:
+        # Simula uma tabela antiga, anterior ao índice único.
+        conn.execute("DROP INDEX IF EXISTS idx_candidates_normalized_url")
+        conn.execute("DROP INDEX IF EXISTS ux_candidates_normalized_url")
+
         insert_candidate(conn, normalized_url)
         insert_candidate(conn, normalized_url)
 
-    # A migração deve interromper-se ao encontrar duplicidades
-    # já existentes, sem apagar registros silenciosamente.
+    # A migração deve interromper-se ao encontrar duplicidades,
+    # sem apagar registros silenciosamente.
     with pytest.raises(RuntimeError):
         repository.init_db()
 
@@ -80,3 +85,4 @@ def test_migration_does_not_silently_delete_existing_duplicates(
         ).fetchone()
 
     assert row["total"] == 2
+    
