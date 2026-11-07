@@ -119,7 +119,7 @@ def execute(conn, sql, params=()):
 
 
 def init_db():
-    """Cria e atualiza as tabelas do Robô 2."""
+    """Cria e atualiza as tabelas do Robô 2 sem apagar vagas."""
     with db_session() as conn:
         if DATABASE_URL:
             conn.execute("""
@@ -225,17 +225,8 @@ def init_db():
             """
         ).fetchall()
 
-        seen = set()
-
         for row in rows:
             normalized = normalize_job_url(row["original_job_url"])
-
-            if normalized in seen:
-                normalized = (
-                    f"{normalized}#legacy-duplicate-{row['id']}"
-                )
-
-            seen.add(normalized)
 
             execute(
                 conn,
@@ -247,25 +238,35 @@ def init_db():
                 (normalized, row["id"]),
             )
 
-        conn.execute("""
-            DELETE FROM candidates
+        duplicates = execute(
+            conn,
+            """
+            SELECT normalized_url, COUNT(*) AS total
+            FROM candidates
             WHERE normalized_url IS NOT NULL
               AND normalized_url != ''
-              AND id NOT IN (
-                  SELECT MIN(id)
-                  FROM candidates
-                  WHERE normalized_url IS NOT NULL
-                    AND normalized_url != ''
-                  GROUP BY normalized_url
-              )
-        """)
+            GROUP BY normalized_url
+            HAVING COUNT(*) > 1
+            LIMIT 5
+            """
+        ).fetchall()
+
+        if duplicates:
+            examples = ", ".join(
+                f"{row['normalized_url']} ({row['total']} registros)"
+                for row in duplicates
+            )
+            raise RuntimeError(
+                "Migração interrompida: existem URLs normalizadas "
+                "duplicadas em candidates. Nenhum registro foi apagado. "
+                f"Exemplos: {examples}"
+            )
 
         conn.execute("""
             CREATE UNIQUE INDEX IF NOT EXISTS
             ux_candidates_normalized_url
             ON candidates(normalized_url)
         """)
-        
 
         conn.execute("""
             CREATE INDEX IF NOT EXISTS
@@ -273,7 +274,7 @@ def init_db():
             ON sources(enabled)
         """)
 
-
+                    
 def save_candidate(
     candidate: CandidateIn,
     evidence: CandidateEvidence | None = None,
