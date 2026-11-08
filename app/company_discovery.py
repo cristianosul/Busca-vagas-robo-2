@@ -97,6 +97,58 @@ def _validate_public_https_url(url: str):
     return parsed
 
 
+def _validate_public_dns(host: str) -> None:
+    """
+    Verifica se todos os endereços IP retornados pelo DNS
+    são endereços públicos.
+    """
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+
+    # IP literal já foi validado pela função da URL.
+    if ip is not None:
+        if not ip.is_global:
+            raise ValueError("Endereço IP privado não permitido.")
+        return
+
+    try:
+        results = socket.getaddrinfo(
+            host,
+            443,
+            type=socket.SOCK_STREAM,
+        )
+    except OSError as exc:
+        raise ValueError(
+            "Não foi possível validar o endereço DNS."
+        ) from exc
+
+    if not results:
+        raise ValueError("O domínio não possui endereço DNS válido.")
+
+    addresses = set()
+
+    for result in results:
+        address = result[4][0].split("%", 1)[0]
+        addresses.add(address)
+
+    for address in addresses:
+        try:
+            resolved_ip = ipaddress.ip_address(address)
+        except ValueError as exc:
+            raise ValueError(
+                "O DNS retornou um endereço IP inválido."
+            ) from exc
+
+        if not resolved_ip.is_global:
+            raise ValueError(
+                "O domínio aponta para um endereço IP "
+                "privado ou não público."
+            )
+
+
 def _same_company_domain(
     candidate_host: str,
     official_host: str,
