@@ -87,7 +87,11 @@ def test_rejects_empty_company_name():
 
 
 def test_rejects_redirect_to_another_domain(monkeypatch):
+    requested_hosts = []
+
     def handler(request):
+        requested_hosts.append(request.url.host)
+
         if request.url.host == "example.com":
             return httpx.Response(
                 302,
@@ -111,6 +115,8 @@ def test_rejects_redirect_to_another_domain(monkeypatch):
             "Empresa Exemplo",
             "https://example.com",
         )
+
+    assert requested_hosts == ["example.com"]
 
 
 def test_rejects_non_html_response(monkeypatch):
