@@ -79,7 +79,8 @@ def test_save_candidate_blocks_duplicate(isolated_db):
     second = repository.save_candidate(candidate)
 
     assert first["id"] == second["id"]
-    assert second["duplicate"] is True
+    assert second["status"] == "duplicate"
+    assert second["existing_status"] == "review"
 
     with repository.connect() as conn:
         row = repository.execute(
