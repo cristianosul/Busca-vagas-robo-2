@@ -118,6 +118,17 @@ def execute(conn, sql, params=()):
     return conn.execute(sql, params)
 
 
+def serialize_source(row):
+    """Padroniza os dados da fonte entre SQLite e PostgreSQL."""
+    if row is None:
+        return None
+
+    result = dict(row)
+    result["enabled"] = bool(result["enabled"])
+
+    return result
+
+
 def init_db():
     """Cria e atualiza as tabelas do Robô 2 sem apagar vagas."""
     with db_session() as conn:
