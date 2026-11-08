@@ -425,7 +425,7 @@ def get_source_record(source_id: str):
     if not row:
         return None
 
-    return dict(row)
+    return serialize_source(row)
 
 
 def list_sources(enabled_only: bool = False, limit: int = 500):
