@@ -27,4 +27,4 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: |
           python -c "from app.repository import init_db; init_db(); print('CONEXAO NEON OK')"
-          python tests/test_neon.py
+          python -m tests.test_neon
