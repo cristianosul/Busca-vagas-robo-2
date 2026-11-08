@@ -135,3 +135,28 @@ def test_rejects_non_html_response(monkeypatch):
             "Empresa Exemplo",
             "https://example.com",
         )
+
+
+def test_rejects_redirect_to_private_ip(monkeypatch):
+    requested_hosts = []
+
+    def handler(request):
+        requested_hosts.append(request.url.host)
+
+        return httpx.Response(
+            302,
+            headers={
+                "location": "https://127.0.0.1/admin"
+            },
+            request=request,
+        )
+
+    install_mock_site(monkeypatch, handler)
+
+    with pytest.raises(ValueError, match="IP privado"):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
+
+    assert requested_hosts == ["example.com"]
