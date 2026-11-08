@@ -30,7 +30,7 @@ jobs:
       
       - name: Executar todos os testes locais
         env:
-         DATABASE_URL: ""
+          DATABASE_URL: ""
         run: |
-         python -m pytest -q
+          python -m pytest -q
     
