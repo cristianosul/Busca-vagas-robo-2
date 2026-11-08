@@ -27,8 +27,10 @@ jobs:
           pip install -r requirements.txt
           pip install pytest httpx
 
+      
       - name: Executar todos os testes locais
         env:
-          DATABASE_URL: ""
+         DATABASE_URL: ""
         run: |
-          python -m pytest -q test_sources_persistence.py test_sources_auth.py test_source_registry.py test_url_normalization.py test_migration_safety.py test_scoring.py
+         python -m pytest -q
+    
