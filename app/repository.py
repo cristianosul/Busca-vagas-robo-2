@@ -457,7 +457,7 @@ def list_sources(enabled_only: bool = False, limit: int = 500):
                 (limit,),
             ).fetchall()
 
-    return [dict(row) for row in rows]
+    return [serialize_source(row) for row in rows]
 
 
 def update_source_status(source_id: str, enabled: bool):
