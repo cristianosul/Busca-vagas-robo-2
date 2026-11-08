@@ -92,7 +92,6 @@ def test_source_status_persists_after_new_database_connection(
     source = make_source("empresa-persistente", enabled=True)
     register_source(source)
 
-    # Desativa a fonte.
     updated = update_source_status(
         "empresa-persistente",
         False,
@@ -101,17 +100,14 @@ def test_source_status_persists_after_new_database_connection(
     assert updated is not None
     assert not updated["enabled"]
 
-    # Consulta novamente usando uma nova conexão.
     found = get_source("empresa-persistente")
 
     assert found is not None
     assert found.enabled is False
 
-    # Reativa e consulta novamente.
     update_source_status("empresa-persistente", True)
 
     found_again = get_source("empresa-persistente")
 
     assert found_again is not None
     assert found_again.enabled is True
-    
