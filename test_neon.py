@@ -1,12 +1,32 @@
 
+import uuid
+
 from app.models import CandidateIn
-from app.repository import connect, execute, save_candidate
+from app.repository import (
+    DATABASE_URL,
+    connect,
+    execute,
+    normalize_job_url,
+    save_candidate,
+)
 
 
-TEST_URL = "https://example.com/rob2-neon-integration-test-20261105"
+TEST_URL = (
+    "https://example.com/rob2-neon-integration-test-"
+    + uuid.uuid4().hex
+)
 
 
 def main():
+    if not DATABASE_URL:
+        raise RuntimeError(
+            "Teste interrompido: DATABASE_URL não configurada. "
+            "Nenhum teste foi executado no SQLite local."
+        )
+
+    candidate_id = None
+    normalized_url = normalize_job_url(TEST_URL)
+
     candidate = CandidateIn(
         title="Vaga fictícia para teste do Robô 2",
         company="Empresa de Teste",
@@ -19,9 +39,25 @@ def main():
     )
 
     try:
-        # Insere a vaga fictícia duas vezes.
         first = save_candidate(candidate)
+
+        if first["status"] == "duplicate":
+            raise RuntimeError(
+                "URL de teste já cadastrada. "
+                "Nenhum registro existente será removido."
+            )
+
+        candidate_id = first["id"]
+
         second = save_candidate(candidate)
+
+        assert second["status"] == "duplicate", (
+            "A segunda inserção não foi identificada como duplicada"
+        )
+
+        assert second["id"] == candidate_id, (
+            "A duplicidade retornou um ID diferente"
+        )
 
         with connect() as conn:
             row = execute(
@@ -31,30 +67,35 @@ def main():
                        MIN(score) AS score,
                        MIN(status) AS status
                 FROM candidates
-                WHERE normalized_url = ?
+                WHERE id = ?
+                  AND normalized_url = ?
                 """,
-                (TEST_URL,),
+                (candidate_id, normalized_url),
             ).fetchone()
 
         assert row["total"] == 1, "Falha na deduplicação"
         assert row["score"] == 0, "Pontuação inesperada"
         assert row["status"] == "review", "Status inesperado"
 
-        print("TESTE OK: Neon conectado")
-        print("TESTE OK: vaga recebida")
+        print("TESTE OK: conexão com PostgreSQL")
+        print("TESTE OK: vaga fictícia inserida")
         print("TESTE OK: duplicidade bloqueada")
         print("TESTE OK: vaga permaneceu em revisão")
 
     finally:
-        # Remove somente a vaga fictícia deste teste.
-        with connect() as conn:
-            execute(
-                conn,
-                "DELETE FROM candidates WHERE normalized_url = ?",
-                (TEST_URL,),
-            )
+        if candidate_id is not None:
+            with connect() as conn:
+                execute(
+                    conn,
+                    """
+                    DELETE FROM candidates
+                    WHERE id = ?
+                      AND normalized_url = ?
+                    """,
+                    (candidate_id, normalized_url),
+                )
 
-        print("LIMPEZA OK: vaga fictícia removida")
+            print("LIMPEZA OK: registro de teste removido")
 
 
 if __name__ == "__main__":
