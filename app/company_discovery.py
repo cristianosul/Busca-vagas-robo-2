@@ -1,4 +1,3 @@
-
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -10,6 +9,7 @@ import httpx
 USER_AGENT = "BuscaVagasBot/0.1 (+public job source discovery)"
 REQUEST_TIMEOUT = 15.0
 MAX_HTML_BYTES = 1_000_000
+MAX_REDIRECTS = 5
 
 CAREER_TERMS = (
     "carreira",
@@ -72,6 +72,14 @@ def _validate_public_https_url(url: str):
     if parsed.username or parsed.password:
         raise ValueError("A URL não pode conter credenciais.")
 
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ValueError("Porta do endereço inválida.")
+
+    if port not in (None, 443):
+        raise ValueError("Somente a porta HTTPS padrão é permitida.")
+
     host = parsed.hostname.lower().rstrip(".")
 
     if host == "localhost" or host.endswith(".localhost"):
@@ -79,11 +87,11 @@ def _validate_public_https_url(url: str):
 
     try:
         ip = ipaddress.ip_address(host)
-        if not ip.is_global:
-            raise ValueError("Endereço IP privado não permitido.")
-    except ValueError as exc:
-        if "não permitido" in str(exc):
-            raise
+    except ValueError:
+        ip = None
+
+    if ip is not None and not ip.is_global:
+        raise ValueError("Endereço IP privado não permitido.")
 
     return parsed
 
@@ -99,6 +107,20 @@ def _same_company_domain(
         or candidate_host == f"www.{base_host}"
         or candidate_host.endswith(f".{base_host}")
     )
+
+
+def _allowed_redirect_host(
+    candidate_host: str,
+    official_host: str,
+) -> bool:
+    """Permite apenas o domínio oficial e sua versão com www."""
+
+    base_host = official_host.removeprefix("www.")
+
+    return candidate_host in {
+        base_host,
+        f"www.{base_host}",
+    }
 
 
 def _normalize_page_url(url: str) -> str:
@@ -117,6 +139,99 @@ def _is_career_link(url: str, link_text: str) -> bool:
     searchable = f"{url} {link_text}".lower()
 
     return any(term in searchable for term in CAREER_TERMS)
+
+
+def _fetch_checked_html(
+    client: httpx.Client,
+    initial_url: str,
+    official_host: str,
+) -> tuple[str, str]:
+    """
+    Busca HTML seguindo redirecionamentos manualmente.
+
+    Cada destino é validado antes de realizar a próxima requisição.
+    """
+
+    current_url = initial_url
+
+    for redirect_count in range(MAX_REDIRECTS + 1):
+        parsed = _validate_public_https_url(current_url)
+
+        host = parsed.hostname.lower().rstrip(".")
+
+        if not _allowed_redirect_host(host, official_host):
+            raise ValueError(
+                "Redirecionamento para domínio não autorizado."
+            )
+
+        with client.stream("GET", current_url) as response:
+
+            if response.is_redirect:
+                if redirect_count >= MAX_REDIRECTS:
+                    raise ValueError(
+                        "Limite de redirecionamentos excedido."
+                    )
+
+                location = response.headers.get("location")
+
+                if not location:
+                    raise ValueError(
+                        "Redirecionamento sem endereço de destino."
+                    )
+
+                next_url = urljoin(current_url, location)
+
+                next_parsed = _validate_public_https_url(next_url)
+
+                next_host = (
+                    next_parsed.hostname.lower().rstrip(".")
+                )
+
+                if not _allowed_redirect_host(
+                    next_host,
+                    official_host,
+                ):
+                    raise ValueError(
+                        "O site tentou redirecionar para "
+                        "outro domínio. Acesso bloqueado."
+                    )
+
+                current_url = next_url
+                continue
+
+            response.raise_for_status()
+
+            content_type = response.headers.get(
+                "content-type",
+                "",
+            ).lower()
+
+            if "text/html" not in content_type:
+                raise ValueError(
+                    "O endereço não retornou uma página HTML."
+                )
+
+            chunks = []
+            total_bytes = 0
+
+            for chunk in response.iter_bytes():
+                total_bytes += len(chunk)
+
+                if total_bytes > MAX_HTML_BYTES:
+                    raise ValueError(
+                        "Página muito grande para análise."
+                    )
+
+                chunks.append(chunk)
+
+            html = b"".join(chunks).decode(
+                "utf-8",
+                errors="replace",
+            )
+
+            return html, current_url
+
+    raise ValueError("Não foi possível acessar a página com segurança.")
 
 
 def discover_career_pages(
@@ -146,54 +261,15 @@ def discover_career_pages(
 
     with httpx.Client(
         timeout=REQUEST_TIMEOUT,
-        follow_redirects=True,
+        follow_redirects=False,
         headers=headers,
     ) as client:
-        with client.stream(
-            "GET",
+
+        html, final_url = _fetch_checked_html(
+            client,
             official_site_url,
-        ) as response:
-            response.raise_for_status()
-
-            final_url = str(response.url)
-            final = _validate_public_https_url(final_url)
-
-            if not _same_company_domain(
-                final.hostname.lower().rstrip("."),
-                official_host,
-            ):
-                raise ValueError(
-                    "O site redirecionou para outro domínio. "
-                    "A origem precisa ser conferida."
-                )
-
-            content_type = response.headers.get(
-                "content-type",
-                "",
-            ).lower()
-
-            if "text/html" not in content_type:
-                raise ValueError(
-                    "O endereço não retornou uma página HTML."
-                )
-
-            chunks = []
-            total_bytes = 0
-
-            for chunk in response.iter_bytes():
-                total_bytes += len(chunk)
-
-                if total_bytes > MAX_HTML_BYTES:
-                    raise ValueError(
-                        "Página muito grande para análise."
-                    )
-
-                chunks.append(chunk)
-
-    html = b"".join(chunks).decode(
-        "utf-8",
-        errors="replace",
-    )
+            official_host,
+        )
 
     parser = _LinkParser()
     parser.feed(html)
