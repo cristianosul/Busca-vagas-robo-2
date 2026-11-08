@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit, urlunsplit
 import ipaddress
+import socket
 
 import httpx
 
