@@ -35,7 +35,7 @@ def make_source(source_id="empresa-teste"):
         name="Empresa de Teste",
         source_type="company",
         base_url="https://example.com",
-        authorization=["official_public_page"],
+        authorization="official_public_page",
         enabled=False,
         notes="Fonte fictícia para testes",
     )
