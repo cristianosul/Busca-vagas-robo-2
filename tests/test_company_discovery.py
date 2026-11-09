@@ -607,3 +607,29 @@ def test_rejects_too_many_redirects(monkeypatch):
     )
     
     
+def test_rejects_redirect_without_location(monkeypatch):
+    requested_hosts = []
+
+    def handler(request):
+        requested_hosts.append(
+            request.headers.get("host")
+        )
+
+        return httpx.Response(
+            302,
+            request=request,
+        )
+
+    install_mock_site(monkeypatch, handler)
+
+    with pytest.raises(
+        ValueError,
+        match="sem endereço de destino",
+    ):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
+
+    assert requested_hosts == ["example.com"]
+    
