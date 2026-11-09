@@ -202,7 +202,7 @@ def _fetch_checked_html(
     """
     Busca HTML seguindo redirecionamentos manualmente.
 
-    Cada destino é validado antes de realizar a próxima requisição.
+    Valida o domínio e o DNS antes de cada requisição.
     """
 
     current_url = initial_url
@@ -213,13 +213,13 @@ def _fetch_checked_html(
         host = parsed.hostname.lower().rstrip(".")
 
         if not _allowed_redirect_host(host, official_host):
-    raise ValueError(
-        "Redirecionamento para domínio não autorizado."
-    )
+            raise ValueError(
+                "Redirecionamento para domínio não autorizado."
+            )
 
-_validate_public_dns(host)
+        _validate_public_dns(host)
 
-with client.stream("GET", current_url) as response:
+        with client.stream("GET", current_url) as response:
 
             if response.is_redirect:
                 if redirect_count >= MAX_REDIRECTS:
@@ -286,7 +286,9 @@ with client.stream("GET", current_url) as response:
 
             return html, current_url
 
-    raise ValueError("Não foi possível acessar a página com segurança.")
+    raise ValueError(
+        "Não foi possível acessar a página com segurança."
+    )
 
 
 def discover_career_pages(
