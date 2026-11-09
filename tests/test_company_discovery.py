@@ -158,7 +158,7 @@ def test_rejects_redirect_to_private_ip(monkeypatch):
     requested_hosts = []
 
     def handler(request):
-        requested_hosts.append(request.url.host)
+        requested_hosts.append(request.headers.get("host"))
 
         return httpx.Response(
             302,
@@ -218,3 +218,32 @@ def test_rejects_domain_resolving_to_private_ip(monkeypatch):
         )
 
     assert requested_hosts == []
+
+
+def test_connects_to_validated_ip_and_preserves_hostname(monkeypatch):
+    observed = {}
+
+    def handler(request):
+        observed["ip"] = request.url.host
+        observed["host"] = request.headers.get("host")
+        observed["sni"] = request.extensions.get("sni_hostname")
+        observed["connection"] = request.headers.get("connection")
+
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text="<html></html>",
+            request=request,
+        )
+
+    install_mock_site(monkeypatch, handler)
+
+    discovery.discover_career_pages(
+        "Empresa Exemplo",
+        "https://example.com",
+    )
+
+    assert observed["ip"] == "93.184.216.34"
+    assert observed["host"] == "example.com"
+    assert observed["sni"] == "example.com"
+    assert observed["connection"] == "close"
