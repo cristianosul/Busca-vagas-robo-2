@@ -224,43 +224,6 @@ def _fetch_checked_html(
     Busca HTML seguindo redirecionamentos manualmente.
 
     Valida o domínio e o DNS antes de cada requisição.
-    """
-
-    current_url = initial_url
-
-    for redirect_count in range(MAX_REDIRECTS + 1):
-        parsed = _validate_public_https_url(current_url)
-
-        host = parsed.hostname.lower().rstrip(".")
-
-        if not _allowed_redirect_host(host, official_host):
-            raise ValueError(
-                "Redirecionamento para domínio não autorizado."
-            )
-
-        validated_ips = _validate_public_dns(host)
-
-pinned_url = _url_with_pinned_ip(
-    current_url,
-    validated_ips[0],
-)
-
-try:
-    ip_literal = ipaddress.ip_address(host)
-    host_header = (
-        f"[{host}]" if ip_literal.version == 6 else host
-    )
-
-
-def _fetch_checked_html(
-    client: httpx.Client,
-    initial_url: str,
-    official_host: str,
-) -> tuple[str, str]:
-    """
-    Busca HTML seguindo redirecionamentos manualmente.
-
-    Valida o domínio e o DNS antes de cada requisição.
     Conecta usando um IP público validado, preservando
     o Host e o SNI do domínio original.
     """
