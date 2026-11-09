@@ -357,3 +357,19 @@ def test_rejects_html_response_over_maximum_size(monkeypatch):
             "Empresa Exemplo",
             "https://example.com",
         )
+
+
+def test_handles_connection_failure(monkeypatch):
+    def handler(request):
+        raise httpx.ConnectError(
+            "Falha simulada de conexão",
+            request=request,
+        )
+
+    install_mock_site(monkeypatch, handler)
+
+    with pytest.raises(httpx.ConnectError):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
