@@ -247,3 +247,33 @@ def test_connects_to_validated_ip_and_preserves_hostname(monkeypatch):
     assert observed["host"] == "example.com"
     assert observed["sni"] == "example.com"
     assert observed["connection"] == "close"
+
+
+def test_rejects_mixed_public_and_private_dns_results(monkeypatch):
+    requested_hosts = []
+
+    def handler(request):
+        requested_hosts.append(request.headers.get("host"))
+        return httpx.Response(
+            200,
+            text="<html><body>Empresa</body></html>",
+            headers={"content-type": "text/html"},
+        )
+
+    install_mock_site(monkeypatch, handler)
+
+    def mixed_dns(host, port, *args, **kwargs):
+        return [
+            (discovery.socket.AF_INET, discovery.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
+            (discovery.socket.AF_INET, discovery.socket.SOCK_STREAM, 6, "", ("10.0.0.5", 443)),
+        ]
+
+    monkeypatch.setattr(discovery.socket, "getaddrinfo", mixed_dns)
+
+    with pytest.raises(ValueError, match="privado"):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
+
+    assert requested_hosts == []
