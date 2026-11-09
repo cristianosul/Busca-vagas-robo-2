@@ -1,6 +1,11 @@
 
 import httpx
 import pytest
+import shutil
+import ssl
+import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from app import company_discovery as discovery
 
@@ -438,3 +443,85 @@ def test_enables_tls_certificate_verification(monkeypatch):
 
     assert captured_config["verify"] is True
     assert captured_config["trust_env"] is False
+
+
+def test_rejects_self_signed_tls_certificate(tmp_path):
+    openssl = shutil.which("openssl")
+
+    if not openssl:
+        pytest.skip("OpenSSL não está disponível")
+
+    cert_file = tmp_path / "cert.pem"
+    key_file = tmp_path / "key.pem"
+
+    subprocess.run(
+        [
+            openssl,
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-keyout",
+            str(key_file),
+            "-out",
+            str(cert_file),
+            "-days",
+            "1",
+            "-nodes",
+            "-subj",
+            "/CN=127.0.0.1",
+            "-addext",
+            "subjectAltName=IP:127.0.0.1",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    class TestHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"ok")
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        TestHandler,
+    )
+
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(
+        certfile=str(cert_file),
+        keyfile=str(key_file),
+    )
+
+    server.socket = context.wrap_socket(
+        server.socket,
+        server_side=True,
+    )
+
+    thread = threading.Thread(
+        target=server.serve_forever,
+        daemon=True,
+    )
+
+    thread.start()
+
+    try:
+        url = f"https://127.0.0.1:{server.server_port}/"
+
+        with pytest.raises(httpx.ConnectError):
+            httpx.get(
+                url,
+                verify=True,
+                trust_env=False,
+                timeout=5,
+            )
+
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
