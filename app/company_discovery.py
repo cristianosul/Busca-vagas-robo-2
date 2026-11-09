@@ -175,19 +175,6 @@ def _same_company_domain(
     candidate_host: str,
     official_host: str,
 ) -> bool:
-    base_host = official_host.removeprefix("www.")
-
-    return (
-        candidate_host == base_host
-        or candidate_host == f"www.{base_host}"
-        or candidate_host.endswith(f".{base_host}")
-    )
-
-
-def _same_company_domain(
-    candidate_host: str,
-    official_host: str,
-) -> bool:
     try:
         official_ip = ipaddress.ip_address(official_host)
     except ValueError:
