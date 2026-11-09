@@ -403,18 +403,20 @@ def discover_career_pages(
         "Accept": "text/html",
     }
 
+    
     with httpx.Client(
-    timeout=REQUEST_TIMEOUT,
-    follow_redirects=False,
-    headers=headers,
-    trust_env=False,
-) as client:
+        timeout=REQUEST_TIMEOUT,
+        follow_redirects=False,
+        headers=headers,
+        trust_env=False,
+    ) as client:
 
         html, final_url = _fetch_checked_html(
             client,
             official_site_url,
             official_host,
         )
+        
 
     parser = _LinkParser()
     parser.feed(html)
