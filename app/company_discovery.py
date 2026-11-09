@@ -367,10 +367,11 @@ def discover_career_pages(
     }
 
     with httpx.Client(
-        timeout=REQUEST_TIMEOUT,
-        follow_redirects=False,
-        headers=headers,
-    ) as client:
+    timeout=REQUEST_TIMEOUT,
+    follow_redirects=False,
+    headers=headers,
+    trust_env=False,
+) as client:
 
         html, final_url = _fetch_checked_html(
             client,
