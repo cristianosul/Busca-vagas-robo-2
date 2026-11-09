@@ -231,6 +231,7 @@ def _fetch_checked_html(
                     raise ValueError(
                         "Redirecionamento sem endereço de destino."
                     )
+                _validate_public_dns(host)
 
                 next_url = urljoin(current_url, location)
 
