@@ -11,7 +11,7 @@ def install_mock_site(monkeypatch, handler):
     def fake_client(*args, **kwargs):
         kwargs["transport"] = httpx.MockTransport(handler)
         return real_client(*args, **kwargs)
-
+8
     def fake_dns(host, port, *args, **kwargs):
         return [
             (
@@ -334,3 +334,26 @@ def test_prevents_dns_rebinding_by_pinning_validated_ip(monkeypatch):
     assert requests_seen[0]["ip"] == "93.184.216.34"
     assert requests_seen[0]["host"] == "example.com"
     assert requests_seen[0]["sni"] == "example.com"
+
+
+def test_rejects_html_response_over_maximum_size(monkeypatch):
+    def handler(request):
+        large_html = (
+            b"<html><body>"
+            + b"A" * (discovery.MAX_HTML_BYTES + 1)
+            + b"</body></html>"
+        )
+
+        return httpx.Response(
+            200,
+            content=large_html,
+            headers={"content-type": "text/html"},
+        )
+
+    install_mock_site(monkeypatch, handler)
+
+    with pytest.raises(ValueError):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
