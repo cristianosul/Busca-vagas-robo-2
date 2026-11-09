@@ -177,3 +177,44 @@ def test_rejects_redirect_to_private_ip(monkeypatch):
         )
 
     assert requested_hosts == ["example.com"]
+
+
+def test_rejects_domain_resolving_to_private_ip(monkeypatch):
+    requested_hosts = []
+
+    def handler(request):
+        requested_hosts.append(request.url.host)
+
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text="<html></html>",
+            request=request,
+        )
+
+    install_mock_site(monkeypatch, handler)
+
+    def private_dns(host, port, *args, **kwargs):
+        return [
+            (
+                discovery.socket.AF_INET,
+                discovery.socket.SOCK_STREAM,
+                6,
+                "",
+                ("10.0.0.5", 443),
+            )
+        ]
+
+    monkeypatch.setattr(
+        discovery.socket,
+        "getaddrinfo",
+        private_dns,
+    )
+
+    with pytest.raises(ValueError, match="privado"):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
+
+    assert requested_hosts == []
