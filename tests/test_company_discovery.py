@@ -1,4 +1,3 @@
-
 import httpx
 import pytest
 import shutil
@@ -10,6 +9,67 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from app import company_discovery as discovery
 
 
+def install_mock_dns(monkeypatch, responses=None, dns_calls=None):
+    if responses is None:
+        responses = {
+            "A": ["93.184.216.34"],
+            "AAAA": discovery.dns.resolver.NoAnswer(),
+        }
+
+    if dns_calls is None:
+        dns_calls = []
+
+    class FakeAnswer:
+        def __init__(self, addresses):
+            self.addresses = addresses
+            self.rrset = addresses if addresses else None
+
+        def __iter__(self):
+            return iter(self.addresses)
+
+    class FakeResolver:
+        def __init__(self, *args, **kwargs):
+            self.timeout = None
+            self.lifetime = None
+
+        def resolve(
+            self,
+            host,
+            record_type,
+            lifetime=None,
+            raise_on_no_answer=False,
+        ):
+            dns_calls.append((host, record_type))
+
+            response = responses.get(
+                record_type,
+                discovery.dns.resolver.NoAnswer(),
+            )
+
+            if callable(response):
+                response = response(
+                    host,
+                    record_type,
+                    dns_calls,
+                )
+
+            if isinstance(response, BaseException):
+                raise response
+
+            if not response:
+                raise discovery.dns.resolver.NoAnswer()
+
+            return FakeAnswer(response)
+
+    monkeypatch.setattr(
+        discovery.dns.resolver,
+        "Resolver",
+        FakeResolver,
+    )
+
+    return dns_calls
+
+
 def install_mock_site(monkeypatch, handler):
     real_client = httpx.Client
 
@@ -17,28 +77,13 @@ def install_mock_site(monkeypatch, handler):
         kwargs["transport"] = httpx.MockTransport(handler)
         return real_client(*args, **kwargs)
 
-    def fake_dns(host, port, *args, **kwargs):
-        return [
-            (
-                discovery.socket.AF_INET,
-                discovery.socket.SOCK_STREAM,
-                6,
-                "",
-                ("93.184.216.34", 443),
-            )
-        ]
-
     monkeypatch.setattr(
         discovery.httpx,
         "Client",
         fake_client,
     )
 
-    monkeypatch.setattr(
-        discovery.socket,
-        "getaddrinfo",
-        fake_dns,
-    )
+    install_mock_dns(monkeypatch)
 
 
 def test_discovers_career_pages_and_ignores_external_links(
@@ -199,21 +244,12 @@ def test_rejects_domain_resolving_to_private_ip(monkeypatch):
 
     install_mock_site(monkeypatch, handler)
 
-    def private_dns(host, port, *args, **kwargs):
-        return [
-            (
-                discovery.socket.AF_INET,
-                discovery.socket.SOCK_STREAM,
-                6,
-                "",
-                ("10.0.0.5", 443),
-            )
-        ]
-
-    monkeypatch.setattr(
-        discovery.socket,
-        "getaddrinfo",
-        private_dns,
+    install_mock_dns(
+        monkeypatch,
+        {
+            "A": ["10.0.0.5"],
+            "AAAA": discovery.dns.resolver.NoAnswer(),
+        },
     )
 
     with pytest.raises(ValueError, match="privado"):
@@ -263,17 +299,21 @@ def test_rejects_mixed_public_and_private_dns_results(monkeypatch):
             200,
             text="<html><body>Empresa</body></html>",
             headers={"content-type": "text/html"},
+            request=request,
         )
 
     install_mock_site(monkeypatch, handler)
 
-    def mixed_dns(host, port, *args, **kwargs):
-        return [
-            (discovery.socket.AF_INET, discovery.socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443)),
-            (discovery.socket.AF_INET, discovery.socket.SOCK_STREAM, 6, "", ("10.0.0.5", 443)),
-        ]
-
-    monkeypatch.setattr(discovery.socket, "getaddrinfo", mixed_dns)
+    install_mock_dns(
+        monkeypatch,
+        {
+            "A": [
+                "93.184.216.34",
+                "10.0.0.5",
+            ],
+            "AAAA": discovery.dns.resolver.NoAnswer(),
+        },
+    )
 
     with pytest.raises(ValueError, match="privado"):
         discovery.discover_career_pages(
@@ -299,33 +339,32 @@ def test_prevents_dns_rebinding_by_pinning_validated_ip(monkeypatch):
             200,
             text="<html><a href='/carreiras'>Carreiras</a></html>",
             headers={"content-type": "text/html"},
+            request=request,
         )
 
     install_mock_site(monkeypatch, handler)
 
-    def rebinding_dns(host, port, *args, **kwargs):
-        dns_calls.append(host)
+    def rebinding_response(host, record_type, calls):
+        if record_type == "AAAA":
+            raise discovery.dns.resolver.NoAnswer()
 
-        ip = (
-            "93.184.216.34"
-            if len(dns_calls) == 1
-            else "10.0.0.5"
+        a_calls = sum(
+            1 for _, kind in calls
+            if kind == "A"
         )
 
-        return [
-            (
-                discovery.socket.AF_INET,
-                discovery.socket.SOCK_STREAM,
-                6,
-                "",
-                (ip, 443),
-            )
-        ]
+        if a_calls == 1:
+            return ["93.184.216.34"]
 
-    monkeypatch.setattr(
-        discovery.socket,
-        "getaddrinfo",
-        rebinding_dns,
+        return ["10.0.0.5"]
+
+    install_mock_dns(
+        monkeypatch,
+        {
+            "A": rebinding_response,
+            "AAAA": discovery.dns.resolver.NoAnswer(),
+        },
+        dns_calls,
     )
 
     discovery.discover_career_pages(
@@ -333,7 +372,12 @@ def test_prevents_dns_rebinding_by_pinning_validated_ip(monkeypatch):
         "https://example.com",
     )
 
-    assert len(dns_calls) == 1
+    a_calls = [
+        call for call in dns_calls
+        if call[1] == "A"
+    ]
+
+    assert len(a_calls) == 1
     assert requests_seen
 
     assert requests_seen[0]["ip"] == "93.184.216.34"
@@ -353,6 +397,7 @@ def test_rejects_html_response_over_maximum_size(monkeypatch):
             200,
             content=large_html,
             headers={"content-type": "text/html"},
+            request=request,
         )
 
     install_mock_site(monkeypatch, handler)
@@ -420,6 +465,7 @@ def test_enables_tls_certificate_verification(monkeypatch):
             200,
             text="<html><body>Empresa</body></html>",
             headers={"content-type": "text/html"},
+            request=request,
         )
 
     install_mock_site(monkeypatch, handler)
@@ -526,6 +572,7 @@ def test_rejects_self_signed_tls_certificate(tmp_path):
         server.server_close()
         thread.join(timeout=2)
 
+
 def test_ip_official_site_rejects_fake_subdomains():
     assert not discovery._same_company_domain(
         "empresa.93.184.216.34",
@@ -605,8 +652,8 @@ def test_rejects_too_many_redirects(monkeypatch):
     assert len(requested_hosts) == (
         discovery.MAX_REDIRECTS + 1
     )
-    
-    
+
+
 def test_rejects_redirect_without_location(monkeypatch):
     requested_hosts = []
 
@@ -632,4 +679,3 @@ def test_rejects_redirect_without_location(monkeypatch):
         )
 
     assert requested_hosts == ["example.com"]
-    
