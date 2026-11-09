@@ -107,9 +107,9 @@ def test_rejects_redirect_to_another_domain(monkeypatch):
     requested_hosts = []
 
     def handler(request):
-        requested_hosts.append(request.url.host)
+        requested_hosts.append(request.headers.get("host"))
 
-        if request.url.host == "example.com":
+        if request.headers.get("host") == "example.com":
             return httpx.Response(
                 302,
                 headers={
