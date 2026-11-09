@@ -376,23 +376,22 @@ def test_handles_connection_failure(monkeypatch):
 
 
 def test_closes_response_when_html_reading_fails(monkeypatch):
-    response_closed = []
+    stream_closed = []
 
-    class FailingResponse(httpx.Response):
-        def iter_bytes(self, *args, **kwargs):
+    class FailingStream(httpx.SyncByteStream):
+        def __iter__(self):
             yield b"<html>"
             raise httpx.ReadError(
-                "Falha simulada durante a leitura",
-                request=self.request,
+                "Falha simulada durante a leitura"
             )
 
         def close(self):
-            response_closed.append(True)
-            super().close()
+            stream_closed.append(True)
 
     def handler(request):
-        return FailingResponse(
+        return httpx.Response(
             200,
+            stream=FailingStream(),
             headers={"content-type": "text/html"},
             request=request,
         )
@@ -405,4 +404,4 @@ def test_closes_response_when_html_reading_fails(monkeypatch):
             "https://example.com",
         )
 
-    assert response_closed
+    assert stream_closed
