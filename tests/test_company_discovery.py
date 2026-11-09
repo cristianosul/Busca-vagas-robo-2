@@ -525,3 +525,25 @@ def test_rejects_self_signed_tls_certificate(tmp_path):
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+def test_ip_official_site_rejects_fake_subdomains():
+    assert not discovery._same_company_domain(
+        "empresa.93.184.216.34",
+        "93.184.216.34",
+    )
+
+    assert not discovery._allowed_redirect_host(
+        "empresa.93.184.216.34",
+        "93.184.216.34",
+    )
+
+    assert discovery._same_company_domain(
+        "93.184.216.34",
+        "93.184.216.34",
+    )
+
+    assert discovery._allowed_redirect_host(
+        "93.184.216.34",
+        "93.184.216.34",
+    )
+    
