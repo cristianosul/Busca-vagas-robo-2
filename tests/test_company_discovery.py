@@ -11,7 +11,7 @@ def install_mock_site(monkeypatch, handler):
     def fake_client(*args, **kwargs):
         kwargs["transport"] = httpx.MockTransport(handler)
         return real_client(*args, **kwargs)
-8
+
     def fake_dns(host, port, *args, **kwargs):
         return [
             (
