@@ -238,7 +238,36 @@ def _fetch_checked_html(
                 "Redirecionamento para domínio não autorizado."
             )
 
-        _validate_public_dns(host)
+        validated_ips = _validate_public_dns(host)
+
+pinned_url = _url_with_pinned_ip(
+    current_url,
+    validated_ips[0],
+)
+
+try:
+    ip_literal = ipaddress.ip_address(host)
+    host_header = (
+        f"[{host}]" if ip_literal.version == 6 else host
+    )
+except ValueError:
+    host_header = host
+
+request_headers = {
+    "Host": host_header,
+    "Connection": "close",
+}
+
+request_extensions = {
+    "sni_hostname": host,
+}
+
+with client.stream(
+    "GET",
+    pinned_url,
+    headers=request_headers,
+    extensions=request_extensions,
+) as response:
 
         with client.stream("GET", current_url) as response:
 
