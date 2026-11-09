@@ -213,11 +213,13 @@ def _fetch_checked_html(
         host = parsed.hostname.lower().rstrip(".")
 
         if not _allowed_redirect_host(host, official_host):
-            raise ValueError(
-                "Redirecionamento para domínio não autorizado."
-            )
+    raise ValueError(
+        "Redirecionamento para domínio não autorizado."
+    )
 
-        with client.stream("GET", current_url) as response:
+_validate_public_dns(host)
+
+with client.stream("GET", current_url) as response:
 
             if response.is_redirect:
                 if redirect_count >= MAX_REDIRECTS:
