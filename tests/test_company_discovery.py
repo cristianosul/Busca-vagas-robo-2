@@ -373,3 +373,36 @@ def test_handles_connection_failure(monkeypatch):
             "Empresa Exemplo",
             "https://example.com",
         )
+
+
+def test_closes_response_when_html_reading_fails(monkeypatch):
+    response_closed = []
+
+    class FailingResponse(httpx.Response):
+        def iter_bytes(self, *args, **kwargs):
+            yield b"<html>"
+            raise httpx.ReadError(
+                "Falha simulada durante a leitura",
+                request=self.request,
+            )
+
+        def close(self):
+            response_closed.append(True)
+            super().close()
+
+    def handler(request):
+        return FailingResponse(
+            200,
+            headers={"content-type": "text/html"},
+            request=request,
+        )
+
+    install_mock_site(monkeypatch, handler)
+
+    with pytest.raises(httpx.ReadError):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
+
+    assert response_closed
