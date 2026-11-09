@@ -250,26 +250,63 @@ try:
     host_header = (
         f"[{host}]" if ip_literal.version == 6 else host
     )
-except ValueError:
-    host_header = host
 
-request_headers = {
-    "Host": host_header,
-    "Connection": "close",
-}
 
-request_extensions = {
-    "sni_hostname": host,
-}
+def _fetch_checked_html(
+    client: httpx.Client,
+    initial_url: str,
+    official_host: str,
+) -> tuple[str, str]:
+    """
+    Busca HTML seguindo redirecionamentos manualmente.
 
-with client.stream(
-    "GET",
-    pinned_url,
-    headers=request_headers,
-    extensions=request_extensions,
-) as response:
+    Valida o domínio e o DNS antes de cada requisição.
+    Conecta usando um IP público validado, preservando
+    o Host e o SNI do domínio original.
+    """
 
-        with client.stream("GET", current_url) as response:
+    current_url = initial_url
+
+    for redirect_count in range(MAX_REDIRECTS + 1):
+        parsed = _validate_public_https_url(current_url)
+
+        host = parsed.hostname.lower().rstrip(".")
+
+        if not _allowed_redirect_host(host, official_host):
+            raise ValueError(
+                "Redirecionamento para domínio não autorizado."
+            )
+
+        validated_ips = _validate_public_dns(host)
+
+        pinned_url = _url_with_pinned_ip(
+            current_url,
+            validated_ips[0],
+        )
+
+        try:
+            ip_literal = ipaddress.ip_address(host)
+            host_header = (
+                f"[{host}]" if ip_literal.version == 6 else host
+            )
+        except ValueError:
+            host_header = host
+
+        request_headers = {
+            "Host": host_header,
+            "Connection": "close",
+        }
+
+        request = client.build_request(
+            "GET",
+            pinned_url,
+            headers=request_headers,
+            extensions={
+                "sni_hostname": host,
+            },
+        )
+
+        with client.send(request, stream=True) as response:
 
             if response.is_redirect:
                 if redirect_count >= MAX_REDIRECTS:
@@ -339,7 +376,7 @@ with client.stream(
     raise ValueError(
         "Não foi possível acessar a página com segurança."
     )
-
+    
 
 def discover_career_pages(
     company_name: str,
