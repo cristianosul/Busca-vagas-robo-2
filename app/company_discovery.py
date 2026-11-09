@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit, urlunsplit
+from contextlib import closing
 import ipaddress
 import socket
 
