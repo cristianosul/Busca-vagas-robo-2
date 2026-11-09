@@ -270,7 +270,7 @@ def _fetch_checked_html(
             },
         )
 
-        with client.send(request, stream=True) as response:
+        with closing(client.send(request, stream=True)) as response:
 
             if response.is_redirect:
                 if redirect_count >= MAX_REDIRECTS:
