@@ -405,3 +405,36 @@ def test_closes_response_when_html_reading_fails(monkeypatch):
         )
 
     assert stream_closed
+
+
+def test_enables_tls_certificate_verification(monkeypatch):
+    captured_config = {}
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            text="<html><body>Empresa</body></html>",
+            headers={"content-type": "text/html"},
+        )
+
+    install_mock_site(monkeypatch, handler)
+
+    original_client = httpx.Client
+
+    def capture_client(*args, **kwargs):
+        captured_config.update(kwargs)
+        return original_client(*args, **kwargs)
+
+    monkeypatch.setattr(
+        httpx,
+        "Client",
+        capture_client,
+    )
+
+    discovery.discover_career_pages(
+        "Empresa Exemplo",
+        "https://example.com",
+    )
+
+    assert captured_config["verify"] is True
+    assert captured_config["trust_env"] is False
