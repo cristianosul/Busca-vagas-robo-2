@@ -5,6 +5,8 @@ from contextlib import closing
 import ipaddress
 import socket
 
+import dns.exception
+import dns.resolver
 import httpx
 
 
