@@ -184,11 +184,50 @@ def _same_company_domain(
     )
 
 
+def _same_company_domain(
+    candidate_host: str,
+    official_host: str,
+) -> bool:
+    try:
+        official_ip = ipaddress.ip_address(official_host)
+    except ValueError:
+        official_ip = None
+
+    if official_ip is not None:
+        try:
+            candidate_ip = ipaddress.ip_address(candidate_host)
+        except ValueError:
+            return False
+
+        return candidate_ip == official_ip
+
+    base_host = official_host.removeprefix("www.")
+
+    return (
+        candidate_host == base_host
+        or candidate_host == f"www.{base_host}"
+        or candidate_host.endswith(f".{base_host}")
+    )
+
+
 def _allowed_redirect_host(
     candidate_host: str,
     official_host: str,
 ) -> bool:
     """Permite apenas o domínio oficial e sua versão com www."""
+
+    try:
+        official_ip = ipaddress.ip_address(official_host)
+    except ValueError:
+        official_ip = None
+
+    if official_ip is not None:
+        try:
+            candidate_ip = ipaddress.ip_address(candidate_host)
+        except ValueError:
+            return False
+
+        return candidate_ip == official_ip
 
     base_host = official_host.removeprefix("www.")
 
@@ -196,6 +235,7 @@ def _allowed_redirect_host(
         base_host,
         f"www.{base_host}",
     }
+    
 
 
 def _normalize_page_url(url: str) -> str:
