@@ -12,10 +12,27 @@ def install_mock_site(monkeypatch, handler):
         kwargs["transport"] = httpx.MockTransport(handler)
         return real_client(*args, **kwargs)
 
+    def fake_dns(host, port, *args, **kwargs):
+        return [
+            (
+                discovery.socket.AF_INET,
+                discovery.socket.SOCK_STREAM,
+                6,
+                "",
+                ("93.184.216.34", 443),
+            )
+        ]
+
     monkeypatch.setattr(
         discovery.httpx,
         "Client",
         fake_client,
+    )
+
+    monkeypatch.setattr(
+        discovery.socket,
+        "getaddrinfo",
+        fake_dns,
     )
 
 
