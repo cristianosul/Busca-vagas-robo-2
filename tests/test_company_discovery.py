@@ -277,3 +277,60 @@ def test_rejects_mixed_public_and_private_dns_results(monkeypatch):
         )
 
     assert requested_hosts == []
+
+
+def test_prevents_dns_rebinding_by_pinning_validated_ip(monkeypatch):
+    dns_calls = []
+    requests_seen = []
+
+    def handler(request):
+        requests_seen.append({
+            "ip": request.url.host,
+            "host": request.headers.get("host"),
+            "sni": request.extensions.get("sni_hostname"),
+        })
+
+        return httpx.Response(
+            200,
+            text="<html><a href='/carreiras'>Carreiras</a></html>",
+            headers={"content-type": "text/html"},
+        )
+
+    install_mock_site(monkeypatch, handler)
+
+    def rebinding_dns(host, port, *args, **kwargs):
+        dns_calls.append(host)
+
+        ip = (
+            "93.184.216.34"
+            if len(dns_calls) == 1
+            else "10.0.0.5"
+        )
+
+        return [
+            (
+                discovery.socket.AF_INET,
+                discovery.socket.SOCK_STREAM,
+                6,
+                "",
+                (ip, 443),
+            )
+        ]
+
+    monkeypatch.setattr(
+        discovery.socket,
+        "getaddrinfo",
+        rebinding_dns,
+    )
+
+    discovery.discover_career_pages(
+        "Empresa Exemplo",
+        "https://example.com",
+    )
+
+    assert len(dns_calls) == 1
+    assert requests_seen
+
+    assert requests_seen[0]["ip"] == "93.184.216.34"
+    assert requests_seen[0]["host"] == "example.com"
+    assert requests_seen[0]["sni"] == "example.com"
