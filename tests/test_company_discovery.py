@@ -546,4 +546,31 @@ def test_ip_official_site_rejects_fake_subdomains():
         "93.184.216.34",
         "93.184.216.34",
     )
+
+
+def test_rejects_redirect_to_unapproved_subdomain(monkeypatch):
+    requested_hosts = []
+
+    def handler(request):
+        requested_hosts.append(
+            request.headers.get("host")
+        )
+
+        return httpx.Response(
+            302,
+            headers={
+                "location": "https://empresa.example.com/jobs"
+            },
+            request=request,
+        )
+
+    install_mock_site(monkeypatch, handler)
+
+    with pytest.raises(ValueError, match="outro domínio"):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
+
+    assert requested_hosts == ["example.com"]
     
