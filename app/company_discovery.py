@@ -150,6 +150,26 @@ def _validate_public_dns(host: str) -> list[str]:
     return sorted(validated)
 
 
+def _url_with_pinned_ip(url: str, ip: str) -> str:
+    """Monta a URL com o IP validado, preservando caminho e consulta."""
+
+    parsed = urlsplit(url)
+    address = ipaddress.ip_address(ip)
+
+    if address.version == 6:
+        netloc = f"[{address.compressed}]"
+    else:
+        netloc = address.compressed
+
+    return urlunsplit((
+        parsed.scheme,
+        netloc,
+        parsed.path or "/",
+        parsed.query,
+        "",
+    ))
+
+
 def _same_company_domain(
     candidate_host: str,
     official_host: str,
