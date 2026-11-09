@@ -101,7 +101,7 @@ def _validate_public_https_url(url: str):
 
 
 def _validate_public_dns(host: str) -> list[str]:
-    """Resolve o domínio e retorna somente IPs públicos validados."""
+    """Resolve A e AAAA com timeout e retorna somente IPs públicos."""
 
     try:
         ip = ipaddress.ip_address(host)
@@ -113,24 +113,52 @@ def _validate_public_dns(host: str) -> list[str]:
             raise ValueError("Endereço IP privado não permitido.")
         return [ip.compressed]
 
-    try:
-        results = socket.getaddrinfo(
-            host,
-            443,
-            type=socket.SOCK_STREAM,
-        )
-    except OSError as exc:
+    resolver = dns.resolver.Resolver(configure=True)
+    resolver.timeout = 3.0
+    resolver.lifetime = 3.0
+
+    addresses = set()
+    successful_responses = 0
+
+    for record_type in ("A", "AAAA"):
+        try:
+            answers = resolver.resolve(
+                host,
+                record_type,
+                lifetime=3.0,
+                raise_on_no_answer=False,
+            )
+
+            if answers.rrset is None:
+                continue
+
+            successful_responses += 1
+
+            for answer in answers:
+                addresses.add(str(answer))
+
+        except dns.resolver.NXDOMAIN as exc:
+            raise ValueError(
+                "O domínio não possui endereço DNS válido."
+            ) from exc
+
+        except dns.resolver.NoNameservers as exc:
+            raise ValueError(
+                "Não foi possível validar o endereço DNS."
+            ) from exc
+
+        except dns.exception.Timeout as exc:
+            raise ValueError(
+                "A consulta DNS excedeu o tempo limite."
+            ) from exc
+
+        except dns.resolver.NoAnswer:
+            successful_responses += 1
+
+    if successful_responses == 0 or not addresses:
         raise ValueError(
-            "Não foi possível validar o endereço DNS."
-        ) from exc
-
-    addresses = {
-        result[4][0].split("%", 1)[0]
-        for result in results
-    }
-
-    if not addresses:
-        raise ValueError("O domínio não possui endereço DNS válido.")
+            "O domínio não possui endereço DNS válido."
+        )
 
     validated = []
 
@@ -151,7 +179,7 @@ def _validate_public_dns(host: str) -> list[str]:
         validated.append(resolved_ip.compressed)
 
     return sorted(validated)
-
+    
 
 def _url_with_pinned_ip(url: str, ip: str) -> str:
     """Monta a URL com o IP validado, preservando caminho e consulta."""
