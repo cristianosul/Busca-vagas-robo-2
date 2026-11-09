@@ -573,4 +573,37 @@ def test_rejects_redirect_to_unapproved_subdomain(monkeypatch):
         )
 
     assert requested_hosts == ["example.com"]
+
+
+def test_rejects_too_many_redirects(monkeypatch):
+    requested_hosts = []
+
+    def handler(request):
+        requested_hosts.append(
+            request.headers.get("host")
+        )
+
+        return httpx.Response(
+            302,
+            headers={
+                "location": "/carreiras"
+            },
+            request=request,
+        )
+
+    install_mock_site(monkeypatch, handler)
+
+    with pytest.raises(
+        ValueError,
+        match="Limite de redirecionamentos",
+    ):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
+
+    assert len(requested_hosts) == (
+        discovery.MAX_REDIRECTS + 1
+    )
+    
     
