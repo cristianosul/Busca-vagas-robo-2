@@ -1103,3 +1103,19 @@ def test_rejects_public_ipv4_with_private_ipv6(monkeypatch):
             "Empresa Exemplo",
             "https://example.com",
         )
+
+
+def test_rejects_ipv4_mapped_private_ipv6(monkeypatch):
+    install_mock_dns(
+        monkeypatch,
+        {
+            "A": ["93.184.216.34"],
+            "AAAA": ["::ffff:192.168.1.10"],
+        },
+    )
+
+    with pytest.raises(ValueError):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
