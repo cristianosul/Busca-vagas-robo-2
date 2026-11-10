@@ -1049,3 +1049,22 @@ def test_rejects_localhost_domains(url):
             "Empresa Exemplo",
             url,
         )
+
+
+def test_rejects_dns_without_any_addresses(monkeypatch):
+    install_mock_dns(
+        monkeypatch,
+        {
+            "A": discovery.dns.resolver.NoAnswer(),
+            "AAAA": discovery.dns.resolver.NoAnswer(),
+        },
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="não possui endereço DNS válido",
+    ):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
