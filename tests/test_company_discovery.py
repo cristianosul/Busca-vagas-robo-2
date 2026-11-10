@@ -744,4 +744,62 @@ def test_rejects_nonexistent_dns_domain(monkeypatch):
             "Empresa Exemplo",
             "https://example.com",
         )
-        
+
+
+def test_tries_next_validated_ip_when_first_connection_fails(
+    monkeypatch,
+):
+    attempted_ips = []
+
+    def handler(request):
+        ip = request.url.host
+        attempted_ips.append(ip)
+
+        if ip == "1.1.1.1":
+            raise httpx.ConnectError(
+                "Primeiro IP indisponível",
+                request=request,
+            )
+
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text="<html><a href='/carreiras'>Carreiras</a></html>",
+            request=request,
+        )
+
+    install_mock_site(monkeypatch, handler)
+
+    dns_calls = install_mock_dns(
+        monkeypatch,
+        {
+            "A": [
+                "1.1.1.1",
+                "93.184.216.34",
+            ],
+            "AAAA": discovery.dns.resolver.NoAnswer(),
+        },
+    )
+
+    results = discovery.discover_career_pages(
+        "Empresa Exemplo",
+        "https://example.com",
+    )
+
+    assert attempted_ips == [
+        "1.1.1.1",
+        "93.184.216.34",
+    ]
+
+    assert len(results) == 1
+    assert results[0].page_url == (
+        "https://example.com/carreiras"
+    )
+
+    a_calls = [
+        call for call in dns_calls
+        if call[1] == "A"
+    ]
+
+    assert len(a_calls) == 1
+    
