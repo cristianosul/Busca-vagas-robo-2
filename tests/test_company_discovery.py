@@ -679,3 +679,36 @@ def test_rejects_redirect_without_location(monkeypatch):
         )
 
     assert requested_hosts == ["example.com"]
+
+
+def test_rejects_private_ipv6_dns_result(monkeypatch):
+    requested_hosts = []
+
+    def handler(request):
+        requested_hosts.append(request.headers.get("host"))
+
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text="<html></html>",
+            request=request,
+        )
+
+    install_mock_site(monkeypatch, handler)
+
+    install_mock_dns(
+        monkeypatch,
+        {
+            "A": ["93.184.216.34"],
+            "AAAA": ["fd00::1"],
+        },
+    )
+
+    with pytest.raises(ValueError, match="privado"):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
+
+    assert requested_hosts == []
+    
