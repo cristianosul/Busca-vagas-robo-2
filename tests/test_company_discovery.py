@@ -899,8 +899,8 @@ def test_tries_next_validated_ip_when_first_connection_times_out(
     ]
 
     assert any(
-        "careers" in page
-        for page in pages
+      "careers" in page.page_url
+      for page in pages
     )
 
     a_calls = [
