@@ -1020,3 +1020,14 @@ def test_rejects_url_with_credentials():
             "Empresa Exemplo",
             "https://usuario:senha@example.com",
         )
+
+
+def test_rejects_nonstandard_https_port():
+    with pytest.raises(
+        ValueError,
+        match="porta HTTPS padrão",
+    ):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com:8443",
+        )
