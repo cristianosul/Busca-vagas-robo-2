@@ -306,6 +306,8 @@ def _send_to_validated_ips(
     last_error = None
 
     for ip in validated_ips:
+        remaining = _remaining_time(deadline)
+
         pinned_url = _url_with_pinned_ip(url, ip)
 
         try:
@@ -326,6 +328,7 @@ def _send_to_validated_ips(
             extensions={
                 "sni_hostname": host,
             },
+            timeout=min(REQUEST_TIMEOUT, remaining),
         )
 
         try:
@@ -338,7 +341,7 @@ def _send_to_validated_ips(
         raise last_error
 
     raise ValueError("Nenhum endereço IP público foi validado.")
-    
+   
 
 def _fetch_checked_html(
     client: httpx.Client,
