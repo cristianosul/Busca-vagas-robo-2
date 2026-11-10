@@ -852,3 +852,60 @@ def test_raises_last_connection_error_when_all_validated_ips_fail(
 
     assert len(a_calls) == 1
     
+
+def test_tries_next_validated_ip_when_first_connection_times_out(
+    monkeypatch,
+):
+    attempted_ips = []
+
+    def handler(request):
+        ip = request.url.host
+        attempted_ips.append(ip)
+
+        if ip == "1.1.1.1":
+            raise httpx.ConnectTimeout(
+                "Tempo limite de conexão",
+                request=request,
+            )
+
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text='<a href="/careers">Carreiras</a>',
+            request=request,
+        )
+
+    install_mock_site(monkeypatch, handler)
+
+    dns_calls = install_mock_dns(
+        monkeypatch,
+        {
+            "A": [
+                "1.1.1.1",
+                "93.184.216.34",
+            ],
+            "AAAA": discovery.dns.resolver.NoAnswer(),
+        },
+    )
+
+    pages = discovery.discover_career_pages(
+        "Empresa Exemplo",
+        "https://example.com",
+    )
+
+    assert attempted_ips == [
+        "1.1.1.1",
+        "93.184.216.34",
+    ]
+
+    assert any(
+        "careers" in page
+        for page in pages
+    )
+
+    a_calls = [
+        call for call in dns_calls
+        if call[1] == "A"
+    ]
+
+    assert len(a_calls) == 1
