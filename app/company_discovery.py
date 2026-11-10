@@ -345,33 +345,15 @@ def _fetch_checked_html(
 
         validated_ips = _validate_public_dns(host)
 
-        pinned_url = _url_with_pinned_ip(
-            current_url,
-            validated_ips[0],
-        )
-
-        try:
-            ip_literal = ipaddress.ip_address(host)
-            host_header = (
-                f"[{host}]" if ip_literal.version == 6 else host
+        with closing(
+            _send_to_validated_ips(
+                client,
+                current_url,
+                host,
+                validated_ips,
             )
-        except ValueError:
-            host_header = host
-
-        request_headers = {
-            "Host": host_header,
-            "Connection": "close",
-        }
-
-        request = client.build_request(
-            "GET",
-            pinned_url,
-            headers=request_headers,
-            extensions={
-                "sni_hostname": host,
-            },
-        )
-
+        ) as response:
+            
         with closing(client.send(request, stream=True)) as response:
 
             if response.is_redirect:
