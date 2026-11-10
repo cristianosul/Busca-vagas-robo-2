@@ -114,7 +114,10 @@ def _validate_public_https_url(url: str):
     return parsed
 
 
-def _validate_public_dns(host: str) -> list[str]:
+def _validate_public_dns(
+    host: str,
+    deadline: float,
+) -> list[str]:
     """Resolve A e AAAA com timeout e retorna somente IPs públicos."""
 
     try:
@@ -128,19 +131,23 @@ def _validate_public_dns(host: str) -> list[str]:
         return [ip.compressed]
 
     resolver = dns.resolver.Resolver(configure=True)
-    resolver.timeout = 3.0
-    resolver.lifetime = 3.0
+    remaining = _remaining_time(deadline)
+
+    resolver.timeout = min(3.0, remaining)
+    resolver.lifetime = min(3.0, remaining)
 
     addresses = set()
     successful_responses = 0
 
     for record_type in ("A", "AAAA"):
         try:
+            remaining = _remaining_time(deadline)
+
             answers = resolver.resolve(
-                host,
-                record_type,
-                lifetime=3.0,
-                raise_on_no_answer=False,
+              host,
+              record_type,
+              lifetime=min(3.0, remaining),
+              raise_on_no_answer=False,
             )
 
             if answers.rrset is None:
