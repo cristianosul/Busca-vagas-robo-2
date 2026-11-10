@@ -1009,3 +1009,14 @@ def test_rejects_dns_without_nameservers(monkeypatch):
             "Empresa Exemplo",
             "https://example.com",
         )
+
+
+def test_rejects_url_with_credentials():
+    with pytest.raises(
+        ValueError,
+        match="credenciais",
+    ):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://usuario:senha@example.com",
+        )
