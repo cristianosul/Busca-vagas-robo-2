@@ -299,6 +299,7 @@ def _send_to_validated_ips(
     url: str,
     host: str,
     validated_ips: list[str],
+    deadline: float,
 ):
     """Tenta os IPs públicos previamente validados."""
 
