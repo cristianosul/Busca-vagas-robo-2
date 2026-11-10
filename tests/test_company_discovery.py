@@ -956,3 +956,37 @@ def test_does_not_retry_when_server_returns_http_500(
     ]
 
     assert len(a_calls) == 1
+
+
+def test_closes_response_when_html_reading_times_out(
+    monkeypatch,
+):
+    stream_closed = []
+
+    class TimeoutStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b"<html>"
+            raise httpx.ReadTimeout(
+                "Tempo limite durante a leitura"
+            )
+
+        def close(self):
+            stream_closed.append(True)
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            stream=TimeoutStream(),
+            headers={"content-type": "text/html"},
+            request=request,
+        )
+
+    install_mock_site(monkeypatch, handler)
+
+    with pytest.raises(httpx.ReadTimeout):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
+
+    assert stream_closed
