@@ -327,8 +327,8 @@ def _fetch_checked_html(
     Busca HTML seguindo redirecionamentos manualmente.
 
     Valida o domínio e o DNS antes de cada requisição.
-    Conecta usando um IP público validado, preservando
-    o Host e o SNI do domínio original.
+    Conecta usando IPs públicos previamente validados,
+    preservando o Host e o SNI do domínio original.
     """
 
     current_url = initial_url
@@ -353,8 +353,6 @@ def _fetch_checked_html(
                 validated_ips,
             )
         ) as response:
-            
-        with closing(client.send(request, stream=True)) as response:
 
             if response.is_redirect:
                 if redirect_count >= MAX_REDIRECTS:
@@ -424,8 +422,8 @@ def _fetch_checked_html(
     raise ValueError(
         "Não foi possível acessar a página com segurança."
     )
-    
 
+    
 def discover_career_pages(
     company_name: str,
     official_site_url: str,
