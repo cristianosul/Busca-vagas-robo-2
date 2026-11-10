@@ -3,7 +3,7 @@ from html.parser import HTMLParser
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from contextlib import closing
 import ipaddress
-import socket
+import time
 
 import dns.exception
 import dns.resolver
@@ -12,6 +12,7 @@ import httpx
 
 USER_AGENT = "BuscaVagasBot/0.1 (+public job source discovery)"
 REQUEST_TIMEOUT = 15.0
+MAX_DISCOVERY_SECONDS = 30.0
 MAX_HTML_BYTES = 1_000_000
 MAX_REDIRECTS = 5
 
@@ -28,6 +29,19 @@ CAREER_TERMS = (
     "work-with-us",
     "join-us",
 )
+
+
+def _remaining_time(deadline: float) -> float:
+    """Retorna o tempo restante da operação ou interrompe a execução."""
+
+    remaining = deadline - time.monotonic()
+
+    if remaining <= 0:
+        raise TimeoutError(
+            "O tempo limite total da descoberta foi excedido."
+        )
+
+    return remaining
 
 
 @dataclass(frozen=True)
