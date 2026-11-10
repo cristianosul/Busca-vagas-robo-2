@@ -365,7 +365,7 @@ def _fetch_checked_html(
                 "Redirecionamento para domínio não autorizado."
             )
 
-        validated_ips = _validate_public_dns(host)
+        validated_ips = _validate_public_dns(host, deadline)
 
         with closing(
             _send_to_validated_ips(
