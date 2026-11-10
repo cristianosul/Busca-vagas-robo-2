@@ -909,3 +909,50 @@ def test_tries_next_validated_ip_when_first_connection_times_out(
     ]
 
     assert len(a_calls) == 1
+
+
+def test_does_not_retry_when_server_returns_http_500(
+    monkeypatch,
+):
+    attempted_ips = []
+
+    def handler(request):
+        ip = request.url.host
+        attempted_ips.append(ip)
+
+        return httpx.Response(
+            500,
+            headers={"content-type": "text/html"},
+            text="Erro interno do servidor",
+            request=request,
+        )
+
+    install_mock_site(monkeypatch, handler)
+
+    dns_calls = install_mock_dns(
+        monkeypatch,
+        {
+            "A": [
+                "1.1.1.1",
+                "93.184.216.34",
+            ],
+            "AAAA": discovery.dns.resolver.NoAnswer(),
+        },
+    )
+
+    with pytest.raises(httpx.HTTPStatusError) as exc_info:
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
+
+    assert exc_info.value.response.status_code == 500
+
+    assert attempted_ips == ["1.1.1.1"]
+
+    a_calls = [
+        call for call in dns_calls
+        if call[1] == "A"
+    ]
+
+    assert len(a_calls) == 1
