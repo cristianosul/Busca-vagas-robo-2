@@ -356,7 +356,8 @@ def _fetch_checked_html(
     current_url = initial_url
 
     for redirect_count in range(MAX_REDIRECTS + 1):
-        parsed = _validate_public_https_url(current_url)
+    _remaining_time(deadline)
+    parsed = _validate_public_https_url(current_url)
 
         host = parsed.hostname.lower().rstrip(".")
 
