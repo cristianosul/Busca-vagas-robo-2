@@ -273,6 +273,51 @@ def _is_career_link(url: str, link_text: str) -> bool:
     return any(term in searchable for term in CAREER_TERMS)
 
 
+def _send_to_validated_ips(
+    client: httpx.Client,
+    url: str,
+    host: str,
+    validated_ips: list[str],
+):
+    """Tenta os IPs públicos previamente validados."""
+
+    last_error = None
+
+    for ip in validated_ips:
+        pinned_url = _url_with_pinned_ip(url, ip)
+
+        try:
+            ip_literal = ipaddress.ip_address(host)
+            host_header = (
+                f"[{host}]" if ip_literal.version == 6 else host
+            )
+        except ValueError:
+            host_header = host
+
+        request = client.build_request(
+            "GET",
+            pinned_url,
+            headers={
+                "Host": host_header,
+                "Connection": "close",
+            },
+            extensions={
+                "sni_hostname": host,
+            },
+        )
+
+        try:
+            return client.send(request, stream=True)
+
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            last_error = exc
+
+    if last_error is not None:
+        raise last_error
+
+    raise ValueError("Nenhum endereço IP público foi validado.")
+    
+
 def _fetch_checked_html(
     client: httpx.Client,
     initial_url: str,
