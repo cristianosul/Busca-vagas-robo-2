@@ -711,4 +711,37 @@ def test_rejects_private_ipv6_dns_result(monkeypatch):
         )
 
     assert requested_hosts == []
-    
+
+
+
+def test_rejects_dns_timeout(monkeypatch):
+    install_mock_dns(
+        monkeypatch,
+        {
+            "A": discovery.dns.exception.Timeout(),
+            "AAAA": discovery.dns.resolver.NoAnswer(),
+        },
+    )
+
+    with pytest.raises(ValueError, match="tempo limite"):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
+
+
+def test_rejects_nonexistent_dns_domain(monkeypatch):
+    install_mock_dns(
+        monkeypatch,
+        {
+            "A": discovery.dns.resolver.NXDOMAIN(),
+            "AAAA": discovery.dns.resolver.NoAnswer(),
+        },
+    )
+
+    with pytest.raises(ValueError, match="DNS válido"):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
+        
