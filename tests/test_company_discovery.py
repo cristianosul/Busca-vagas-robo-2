@@ -1031,3 +1031,21 @@ def test_rejects_nonstandard_https_port():
             "Empresa Exemplo",
             "https://example.com:8443",
         )
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://localhost",
+        "https://painel.localhost",
+    ],
+)
+def test_rejects_localhost_domains(url):
+    with pytest.raises(
+        ValueError,
+        match="Endereço local não permitido",
+    ):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            url,
+        )
