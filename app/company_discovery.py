@@ -343,6 +343,7 @@ def _fetch_checked_html(
     client: httpx.Client,
     initial_url: str,
     official_host: str,
+    deadline: float,
 ) -> tuple[str, str]:
     """
     Busca HTML seguindo redirecionamentos manualmente.
