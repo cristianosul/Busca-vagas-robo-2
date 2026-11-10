@@ -990,3 +990,22 @@ def test_closes_response_when_html_reading_times_out(
         )
 
     assert stream_closed
+
+
+def test_rejects_dns_without_nameservers(monkeypatch):
+    install_mock_dns(
+        monkeypatch,
+        {
+            "A": discovery.dns.resolver.NoNameservers(),
+            "AAAA": discovery.dns.resolver.NoAnswer(),
+        },
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="validar o endereço DNS",
+    ):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
