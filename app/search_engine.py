@@ -151,6 +151,9 @@ class SearchEngine:
         limit: int = 10,
     ) -> list[SearchResult]:
 
+        if not isinstance(query, str):
+            raise ValueError("A pesquisa precisa ser um texto.")
+
         query = " ".join(query.split())
 
         if len(query) < 3:
