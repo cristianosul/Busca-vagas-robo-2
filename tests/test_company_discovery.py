@@ -9,7 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from app import company_discovery as discovery
 
 
-def install_mock_dns(monkeypatch, responses=None, dns_calls=None):
+def install_mock_dns(monkeypatch, responses=None, dns_calls=None, dns_lifetimes=None):
     if responses is None:
         responses = {
             "A": ["93.184.216.34"],
