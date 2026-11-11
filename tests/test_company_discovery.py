@@ -1281,3 +1281,40 @@ def test_dns_queries_respect_remaining_global_time(monkeypatch):
     for lifetime in dns_lifetimes:
         assert 0 < lifetime <= 1.0
         
+
+def test_dns_stops_when_global_deadline_expires_between_queries(
+    monkeypatch,
+):
+    clock = {"now": 100.0}
+
+    monkeypatch.setattr(
+        discovery.time,
+        "monotonic",
+        lambda: clock["now"],
+    )
+
+    def expire_after_a_query(
+        host,
+        record_type,
+        calls,
+    ):
+        clock["now"] = 131.0
+        return ["93.184.216.34"]
+
+    install_mock_dns(
+        monkeypatch,
+        {
+            "A": expire_after_a_query,
+            "AAAA": discovery.dns.resolver.NoAnswer(),
+        },
+    )
+
+    with pytest.raises(
+        TimeoutError,
+        match="tempo limite total",
+    ):
+        discovery._validate_public_dns(
+            "example.com",
+            130.0,
+        )
+        
