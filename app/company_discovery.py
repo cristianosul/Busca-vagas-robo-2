@@ -144,10 +144,10 @@ def _validate_public_dns(
             remaining = _remaining_time(deadline)
 
             answers = resolver.resolve(
-              host,
-              record_type,
-              lifetime=min(3.0, remaining),
-              raise_on_no_answer=False,
+                host,
+                record_type,
+                lifetime=min(3.0, remaining),
+                raise_on_no_answer=False,
             )
 
             if answers.rrset is None:
