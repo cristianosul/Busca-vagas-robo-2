@@ -360,9 +360,9 @@ def _fetch_checked_html(
     current_url = initial_url
 
     for redirect_count in range(MAX_REDIRECTS + 1):
-    _remaining_time(deadline)
-    parsed = _validate_public_https_url(current_url)
+        _remaining_time(deadline)
 
+        parsed = _validate_public_https_url(current_url)
         host = parsed.hostname.lower().rstrip(".")
 
         if not _allowed_redirect_host(host, official_host):
@@ -378,6 +378,7 @@ def _fetch_checked_html(
                 current_url,
                 host,
                 validated_ips,
+                deadline,
             )
         ) as response:
 
@@ -416,6 +417,8 @@ def _fetch_checked_html(
 
             response.raise_for_status()
 
+            _remaining_time(deadline)
+
             content_type = response.headers.get(
                 "content-type",
                 "",
@@ -430,6 +433,8 @@ def _fetch_checked_html(
             total_bytes = 0
 
             for chunk in response.iter_bytes():
+                _remaining_time(deadline)
+
                 total_bytes += len(chunk)
 
                 if total_bytes > MAX_HTML_BYTES:
@@ -438,6 +443,8 @@ def _fetch_checked_html(
                     )
 
                 chunks.append(chunk)
+
+            _remaining_time(deadline)
 
             html = b"".join(chunks).decode(
                 "utf-8",
@@ -449,7 +456,7 @@ def _fetch_checked_html(
     raise ValueError(
         "Não foi possível acessar a página com segurança."
     )
-
+    
     
 def discover_career_pages(
     company_name: str,
