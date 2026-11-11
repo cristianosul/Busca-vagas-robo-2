@@ -474,6 +474,10 @@ def discover_career_pages(
     if len(company_name) < 2:
         raise ValueError("Informe um nome de empresa válido.")
 
+    deadline = time.monotonic() + MAX_DISCOVERY_SECONDS
+
+    _remaining_time(deadline)
+
     official = _validate_public_https_url(official_site_url)
 
     official_host = official.hostname.lower().rstrip(".")
@@ -483,21 +487,22 @@ def discover_career_pages(
         "Accept": "text/html",
     }
 
-    
     with httpx.Client(
-      timeout=REQUEST_TIMEOUT,
-      follow_redirects=False,
-      headers=headers,
-      trust_env=False,
-      verify=True,
-   ) as client:
+        timeout=REQUEST_TIMEOUT,
+        follow_redirects=False,
+        headers=headers,
+        trust_env=False,
+        verify=True,
+    ) as client:
 
         html, final_url = _fetch_checked_html(
             client,
             official_site_url,
             official_host,
+            deadline,
         )
-        
+
+    _remaining_time(deadline)
 
     parser = _LinkParser()
     parser.feed(html)
@@ -506,6 +511,8 @@ def discover_career_pages(
     seen_urls = set()
 
     for href, link_text in parser.links:
+        _remaining_time(deadline)
+
         if not href:
             continue
 
@@ -539,4 +546,7 @@ def discover_career_pages(
             )
         )
 
+    _remaining_time(deadline)
+
     return candidates
+    
