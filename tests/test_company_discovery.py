@@ -1119,3 +1119,32 @@ def test_rejects_ipv4_mapped_private_ipv6(monkeypatch):
             "Empresa Exemplo",
             "https://example.com",
         )
+
+
+def test_remaining_time_returns_positive_time(monkeypatch):
+    monkeypatch.setattr(
+        discovery.time,
+        "monotonic",
+        lambda: 100.0,
+    )
+
+    remaining = discovery._remaining_time(110.0)
+
+    assert remaining == 10.0
+
+
+def test_remaining_time_raises_when_deadline_expires(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        discovery.time,
+        "monotonic",
+        lambda: 100.0,
+    )
+
+    with pytest.raises(
+        TimeoutError,
+        match="tempo limite total",
+    ):
+        discovery._remaining_time(99.0)
+        
