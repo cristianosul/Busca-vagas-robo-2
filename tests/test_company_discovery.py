@@ -1301,12 +1301,12 @@ def test_dns_stops_when_global_deadline_expires_between_queries(
         clock["now"] = 131.0
         return ["93.184.216.34"]
 
-    install_mock_dns(
-        monkeypatch,
-        {
-            "A": expire_after_a_query,
-            "AAAA": discovery.dns.resolver.NoAnswer(),
-        },
+    dns_calls = install_mock_dns(
+    monkeypatch,
+    {
+        "A": expire_after_a_query,
+        "AAAA": discovery.dns.resolver.NoAnswer(),
+    },
     )
 
     with pytest.raises(
@@ -1317,4 +1317,5 @@ def test_dns_stops_when_global_deadline_expires_between_queries(
             "example.com",
             130.0,
         )
+         assert dns_calls == [("example.com", "A")]
         
