@@ -19,6 +19,9 @@ def install_mock_dns(monkeypatch, responses=None, dns_calls=None, dns_lifetimes=
     if dns_calls is None:
         dns_calls = []
 
+    if dns_lifetimes is None:
+        dns_lifetimes = []
+    
     class FakeAnswer:
         def __init__(self, addresses):
             self.addresses = addresses
