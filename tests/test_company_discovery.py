@@ -1317,5 +1317,5 @@ def test_dns_stops_when_global_deadline_expires_between_queries(
             "example.com",
             130.0,
         )
-         assert dns_calls == [("example.com", "A")]
+    assert dns_calls == [("example.com", "A")]
         
