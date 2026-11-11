@@ -1255,3 +1255,29 @@ def test_discover_career_pages_stops_when_deadline_expires_during_parsing(
             "https://example.com",
         )
         
+
+def test_dns_queries_respect_remaining_global_time(monkeypatch):
+    dns_lifetimes = []
+
+    install_mock_dns(
+        monkeypatch,
+        {
+            "A": ["93.184.216.34"],
+            "AAAA": discovery.dns.resolver.NoAnswer(),
+        },
+        dns_lifetimes=dns_lifetimes,
+    )
+
+    deadline = discovery.time.monotonic() + 5.0
+
+    ips = discovery._validate_public_dns(
+        "example.com",
+        deadline,
+    )
+
+    assert ips == ["93.184.216.34"]
+    assert len(dns_lifetimes) == 2
+
+    for lifetime in dns_lifetimes:
+        assert 0 < lifetime <= 3.0
+        
