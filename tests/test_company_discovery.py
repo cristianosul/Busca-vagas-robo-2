@@ -1268,7 +1268,7 @@ def test_dns_queries_respect_remaining_global_time(monkeypatch):
         dns_lifetimes=dns_lifetimes,
     )
 
-    deadline = discovery.time.monotonic() + 5.0
+    deadline = discovery.time.monotonic() + 1.0
 
     ips = discovery._validate_public_dns(
         "example.com",
@@ -1279,5 +1279,5 @@ def test_dns_queries_respect_remaining_global_time(monkeypatch):
     assert len(dns_lifetimes) == 2
 
     for lifetime in dns_lifetimes:
-        assert 0 < lifetime <= 3.0
+        assert 0 < lifetime <= 1.0
         
