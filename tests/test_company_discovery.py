@@ -43,6 +43,7 @@ def install_mock_dns(monkeypatch, responses=None, dns_calls=None, dns_lifetimes=
             raise_on_no_answer=False,
         ):
             dns_calls.append((host, record_type))
+            dns_lifetimes.append(lifetime)
 
             response = responses.get(
                 record_type,
