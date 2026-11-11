@@ -341,7 +341,7 @@ def _send_to_validated_ips(
         raise last_error
 
     raise ValueError("Nenhum endereço IP público foi validado.")
-   
+
 
 def _fetch_checked_html(
     client: httpx.Client,
