@@ -1148,3 +1148,32 @@ def test_remaining_time_raises_when_deadline_expires(
     ):
         discovery._remaining_time(99.0)
         
+
+def test_send_to_validated_ips_uses_remaining_time_for_http_timeout():
+    captured = {}
+
+    def handler(request):
+        captured["timeout"] = request.extensions["timeout"]
+        return httpx.Response(200, request=request)
+
+    with httpx.Client(
+        transport=httpx.MockTransport(handler),
+        trust_env=False,
+    ) as client:
+        deadline = discovery.time.monotonic() + 5.0
+
+        response = discovery._send_to_validated_ips(
+            client,
+            "https://example.com",
+            "example.com",
+            ["93.184.216.34"],
+            deadline,
+        )
+
+        response.close()
+
+    assert 0 < captured["timeout"]["connect"] <= 5.0
+    assert 0 < captured["timeout"]["read"] <= 5.0
+    assert 0 < captured["timeout"]["write"] <= 5.0
+    assert 0 < captured["timeout"]["pool"] <= 5.0
+    
