@@ -1205,3 +1205,49 @@ def test_send_to_validated_ips_stops_when_deadline_expires(
             99.0,
         )
         
+
+def test_discover_career_pages_stops_when_deadline_expires_during_parsing(
+    monkeypatch,
+):
+    times = iter([100.0, 100.0, 100.0, 131.0])
+
+    monkeypatch.setattr(
+        discovery.time,
+        "monotonic",
+        lambda: next(times),
+    )
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr(
+        discovery.httpx,
+        "Client",
+        FakeClient,
+    )
+
+    monkeypatch.setattr(
+        discovery,
+        "_fetch_checked_html",
+        lambda *args: (
+            '<a href="/careers">Careers</a>',
+            "https://example.com",
+        ),
+    )
+
+    with pytest.raises(
+        TimeoutError,
+        match="tempo limite total",
+    ):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
+        
