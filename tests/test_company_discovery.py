@@ -1176,4 +1176,32 @@ def test_send_to_validated_ips_uses_remaining_time_for_http_timeout():
     assert 0 < captured["timeout"]["read"] <= 5.0
     assert 0 < captured["timeout"]["write"] <= 5.0
     assert 0 < captured["timeout"]["pool"] <= 5.0
-    
+
+
+def test_send_to_validated_ips_stops_when_deadline_expires(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        discovery.time,
+        "monotonic",
+        lambda: 100.0,
+    )
+
+    class FakeClient:
+        def build_request(self, *args, **kwargs):
+            pytest.fail(
+                "A requisição não deveria ser construída"
+            )
+
+    with pytest.raises(
+        TimeoutError,
+        match="tempo limite total",
+    ):
+        discovery._send_to_validated_ips(
+            FakeClient(),
+            "https://example.com",
+            "example.com",
+            ["93.184.216.34"],
+            99.0,
+        )
+        
