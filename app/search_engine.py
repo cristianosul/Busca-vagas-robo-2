@@ -99,6 +99,15 @@ class SearchResult:
     provider: str = ""
 
     def __post_init__(self):
+        if not isinstance(self.title, str):
+            raise ValueError("O título precisa ser um texto.")
+
+        if not isinstance(self.snippet, str):
+            raise ValueError("A descrição precisa ser um texto.")
+
+        if not isinstance(self.provider, str):
+            raise ValueError("O provedor precisa ser um texto.")
+
         title = self.title.strip()
         snippet = self.snippet.strip()
         provider = self.provider.strip()
