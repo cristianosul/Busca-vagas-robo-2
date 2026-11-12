@@ -80,6 +80,8 @@ def normalize_search_url(url: str) -> str:
 
     normalized_query = urlencode(query_parameters)
 
+    netloc = f"[{host}]" if ":" in host else host
+    
     return urlunsplit((
         "https",
         host,
