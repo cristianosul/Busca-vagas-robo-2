@@ -1079,6 +1079,25 @@ def test_rejects_dns_without_nameservers(monkeypatch):
         )
 
 
+def test_rejects_unexpected_dns_error(monkeypatch):
+    install_mock_dns(
+        monkeypatch,
+        {
+            "A": RuntimeError("Falha inesperada no DNS"),
+            "AAAA": discovery.dns.resolver.NoAnswer(),
+        },
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="falha inesperada durante a consulta DNS",
+    ):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
+
+
 def test_rejects_url_with_credentials():
     with pytest.raises(
         ValueError,
