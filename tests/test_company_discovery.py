@@ -157,6 +157,28 @@ def test_rejects_empty_company_name():
         )
 
 
+def test_rejects_non_string_company_name():
+    with pytest.raises(
+        ValueError,
+        match="nome da empresa precisa ser um texto",
+    ):
+        discovery.discover_career_pages(
+            None,
+            "https://example.com",
+        )
+
+
+def test_rejects_non_string_official_site_url():
+    with pytest.raises(
+        ValueError,
+        match="endereço do site oficial precisa ser um texto",
+    ):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            None,
+        )
+
+
 def test_rejects_redirect_to_another_domain(monkeypatch):
     requested_hosts = []
 
