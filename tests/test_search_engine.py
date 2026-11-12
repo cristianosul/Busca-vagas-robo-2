@@ -257,4 +257,71 @@ def test_build_company_queries_rejects_empty_name():
 def test_build_company_queries_rejects_long_name():
     with pytest.raises(ValueError, match="muito longo"):
         build_company_queries("A" * 151)
-  
+
+
+@pytest.mark.parametrize(
+    "query",
+    [None, 123, [], {}],
+)
+def test_search_engine_rejects_non_string_query(query):
+    engine = SearchEngine(
+        [FakeProvider("Example", [])]
+    )
+
+    with pytest.raises(ValueError, match="texto"):
+        engine.search(query)
+
+
+@pytest.mark.parametrize(
+    "title",
+    [None, 123, [], {}],
+)
+def test_search_result_rejects_non_string_title(title):
+    with pytest.raises(ValueError, match="título"):
+        SearchResult(
+            title=title,
+            url="https://example.com",
+        )
+
+
+@pytest.mark.parametrize(
+    "snippet",
+    [None, 123, [], {}],
+)
+def test_search_result_rejects_non_string_snippet(snippet):
+    with pytest.raises(ValueError, match="descrição"):
+        SearchResult(
+            title="Vaga",
+            url="https://example.com",
+            snippet=snippet,
+        )
+
+
+@pytest.mark.parametrize(
+    "provider",
+    [None, 123, [], {}],
+)
+def test_search_result_rejects_non_string_provider(provider):
+    with pytest.raises(ValueError, match="provedor"):
+        SearchResult(
+            title="Vaga",
+            url="https://example.com",
+            provider=provider,
+        )
+
+
+@pytest.mark.parametrize(
+    "company_name",
+    [None, 123, [], {}],
+)
+def test_build_company_queries_rejects_non_string_name(company_name):
+    with pytest.raises(ValueError, match="texto"):
+        build_company_queries(company_name)
+
+
+def test_normalize_search_url_supports_public_ipv6():
+    result = normalize_search_url(
+        "https://[2606:4700:4700::1111]/jobs"
+    )
+
+    assert result == "https://[2606:4700:4700::1111]/jobs"
