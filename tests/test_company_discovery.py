@@ -775,7 +775,28 @@ def test_rejects_aaaa_timeout_even_when_a_is_public(
             "Empresa Exemplo",
             "https://example.com",
         )
-        
+
+
+def test_rejects_a_timeout_even_when_aaaa_is_public(
+    monkeypatch,
+):
+    install_mock_dns(
+        monkeypatch,
+        {
+            "A": discovery.dns.exception.Timeout(),
+            "AAAA": ["2606:2800:220:1:248:1893:25c8:1946"],
+        },
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="tempo limite",
+    ):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            "https://example.com",
+        )
+
 
 def test_rejects_nonexistent_dns_domain(monkeypatch):
     install_mock_dns(
