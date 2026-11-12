@@ -84,7 +84,7 @@ def normalize_search_url(url: str) -> str:
     
     return urlunsplit((
         "https",
-        host,
+        netloc,
         parsed.path or "/",
         normalized_query,
         "",
