@@ -469,6 +469,9 @@ def discover_career_pages(
     Não cadastra fontes no banco e não publica oportunidades.
     """
 
+    if not isinstance(company_name, str):
+        raise ValueError("O nome da empresa precisa ser um texto.")
+
     company_name = company_name.strip()
 
     if len(company_name) < 2:
