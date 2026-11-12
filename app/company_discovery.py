@@ -481,6 +481,9 @@ def discover_career_pages(
 
     _remaining_time(deadline)
 
+    if not isinstance(official_site_url, str):
+        raise ValueError("O endereço do site oficial precisa ser um texto.")
+
     official = _validate_public_https_url(official_site_url)
 
     official_host = official.hostname.lower().rstrip(".")
