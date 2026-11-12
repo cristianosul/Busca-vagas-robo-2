@@ -3,6 +3,7 @@ import pytest
 from app.search_engine import (
     SearchEngine,
     SearchResult,
+    TavilySearchProvider,
     build_company_queries,
     normalize_search_url,
 )
