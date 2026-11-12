@@ -326,3 +326,192 @@ def test_normalize_search_url_supports_public_ipv6():
     )
 
     assert result == "https://[2606:4700:4700::1111]/jobs"
+
+
+def test_tavily_search_sends_authorization_and_basic_payload(monkeypatch):
+    import app.search_engine as search_module
+
+    captured = {}
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "results": [
+                    {
+                        "title": "Carreiras - Empresa Exemplo",
+                        "url": "https://example.com/carreiras",
+                        "content": "Página oficial de oportunidades.",
+                    }
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            captured["client_options"] = kwargs
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, url, *, headers, json):
+            captured["url"] = url
+            captured["headers"] = headers
+            captured["payload"] = json
+            return FakeResponse()
+
+    monkeypatch.setattr(search_module.httpx, "Client", FakeClient)
+
+    provider = TavilySearchProvider(api_key="chave-teste")
+    results = provider.search("empresa exemplo carreiras", limit=5)
+
+    assert len(results) == 1
+    assert results[0].title == "Carreiras - Empresa Exemplo"
+    assert results[0].provider == "tavily"
+
+    assert captured["url"] == search_module.TAVILY_ENDPOINT
+    assert captured["headers"]["Authorization"] == "Bearer chave-teste"
+    assert captured["payload"]["search_depth"] == "basic"
+    assert captured["payload"]["max_results"] == 5
+    assert captured["payload"]["include_answer"] is False
+    assert captured["payload"]["include_raw_content"] is False
+
+    assert captured["client_options"]["follow_redirects"] is False
+    assert captured["client_options"]["trust_env"] is False
+
+
+def test_tavily_search_requires_api_key(monkeypatch):
+    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+
+    provider = TavilySearchProvider()
+
+    with pytest.raises(RuntimeError, match="TAVILY_API_KEY"):
+        provider.search("vagas de emprego", limit=5)
+
+
+def test_tavily_search_rejects_invalid_limit():
+    provider = TavilySearchProvider(api_key="chave-teste")
+
+    for limit in [0, -1, 21, True, 1.5]:
+        with pytest.raises(ValueError):
+            provider.search("vagas de emprego", limit=limit)
+
+
+def test_tavily_search_skips_invalid_result_urls(monkeypatch):
+    import app.search_engine as search_module
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "results": [
+                    {
+                        "title": "URL insegura",
+                        "url": "http://example.com/vaga",
+                        "content": "Descrição",
+                    },
+                    {
+                        "title": "URL válida",
+                        "url": "https://example.com/vaga",
+                        "content": "Descrição",
+                    },
+                ]
+            }
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(search_module.httpx, "Client", FakeClient)
+
+    provider = TavilySearchProvider(api_key="chave-teste")
+    results = provider.search("vagas de emprego", limit=5)
+
+    assert len(results) == 1
+    assert results[0].title == "URL válida"
+
+
+@pytest.mark.parametrize(
+    ("status_code", "message"),
+    [
+        (401, "autenticação"),
+        (403, "autenticação"),
+        (429, "Limite"),
+        (500, "indisponível"),
+        (503, "indisponível"),
+    ],
+)
+def test_tavily_search_handles_api_errors(
+    monkeypatch,
+    status_code,
+    message,
+):
+    import app.search_engine as search_module
+
+    class FakeResponse:
+        def __init__(self):
+            self.status_code = status_code
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(search_module.httpx, "Client", FakeClient)
+
+    provider = TavilySearchProvider(api_key="chave-teste")
+
+    with pytest.raises(RuntimeError, match=message):
+        provider.search("vagas de emprego", limit=5)
+
+
+def test_tavily_search_rejects_invalid_json_response(monkeypatch):
+    import app.search_engine as search_module
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            raise ValueError("JSON inválido")
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(search_module.httpx, "Client", FakeClient)
+
+    provider = TavilySearchProvider(api_key="chave-teste")
+
+    with pytest.raises(RuntimeError, match="JSON inválido"):
+        provider.search("vagas de emprego", limit=5)
+        
