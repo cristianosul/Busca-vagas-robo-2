@@ -230,6 +230,9 @@ class SearchEngine:
 def build_company_queries(company_name: str) -> list[str]:
     """Gera pesquisas para localizar páginas oficiais de carreiras."""
 
+    if not isinstance(company_name, str):
+        raise ValueError("O nome da empresa precisa ser um texto.")
+
     company_name = " ".join(company_name.split())
 
     if len(company_name) < 2:
