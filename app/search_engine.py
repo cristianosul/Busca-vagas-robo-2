@@ -1,4 +1,6 @@
 
+import ipaddress
+import os
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 from urllib.parse import (
@@ -7,13 +9,18 @@ from urllib.parse import (
     urlsplit,
     urlunsplit,
 )
-import ipaddress
+
+import httpx
 
 
 MAX_QUERY_LENGTH = 300
 MAX_RESULTS = 50
 MAX_TITLE_LENGTH = 300
 MAX_SNIPPET_LENGTH = 2000
+
+TAVILY_ENDPOINT = "https://api.tavily.com/search"
+TAVILY_TIMEOUT = 15.0
+TAVILY_MAX_RESULTS = 20
 
 TRACKING_PARAMETERS = {
     "gclid",
@@ -81,7 +88,7 @@ def normalize_search_url(url: str) -> str:
     normalized_query = urlencode(query_parameters)
 
     netloc = f"[{host}]" if ":" in host else host
-    
+
     return urlunsplit((
         "https",
         netloc,
@@ -147,6 +154,159 @@ class SearchProvider(Protocol):
         ...
 
 
+class TavilySearchProvider:
+    """Provedor de pesquisa web usando a API oficial do Tavily."""
+
+    name = "tavily"
+
+    def __init__(self, api_key: str | None = None):
+        self.api_key = (
+            api_key
+            if api_key is not None
+            else os.getenv("TAVILY_API_KEY", "")
+        ).strip()
+
+    def search(
+        self,
+        query: str,
+        *,
+        limit: int,
+    ) -> Sequence[SearchResult]:
+
+        if not isinstance(query, str):
+            raise ValueError("A pesquisa precisa ser um texto.")
+
+        query = " ".join(query.split())
+
+        if len(query) < 3 or len(query) > MAX_QUERY_LENGTH:
+            raise ValueError("Texto de pesquisa fora do limite permitido.")
+
+        if (
+            not isinstance(limit, int)
+            or isinstance(limit, bool)
+            or not 1 <= limit <= TAVILY_MAX_RESULTS
+        ):
+            raise ValueError(
+                f"O Tavily permite entre 1 e {TAVILY_MAX_RESULTS} resultados."
+            )
+
+        if not self.api_key:
+            raise RuntimeError(
+                "A chave TAVILY_API_KEY não foi configurada."
+            )
+
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        payload = {
+            "query": query,
+            "search_depth": "basic",
+            "topic": "general",
+            "max_results": limit,
+            "include_answer": False,
+            "include_raw_content": False,
+        }
+
+        try:
+            with httpx.Client(
+                timeout=TAVILY_TIMEOUT,
+                follow_redirects=False,
+                trust_env=False,
+            ) as client:
+                response = client.post(
+                    TAVILY_ENDPOINT,
+                    headers=headers,
+                    json=payload,
+                )
+
+        except httpx.TimeoutException as exc:
+            raise RuntimeError(
+                "O Tavily demorou demais para responder."
+            ) from exc
+
+        except httpx.RequestError as exc:
+            raise RuntimeError(
+                "Não foi possível conectar ao serviço de pesquisa."
+            ) from exc
+
+        if response.status_code in (401, 403):
+            raise RuntimeError(
+                "O Tavily recusou a autenticação. Verifique a chave API."
+            )
+
+        if response.status_code == 429:
+            raise RuntimeError(
+                "Limite de utilização do Tavily atingido."
+            )
+
+        if response.status_code >= 500:
+            raise RuntimeError(
+                "O serviço Tavily está temporariamente indisponível."
+            )
+
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"O Tavily retornou erro HTTP {response.status_code}."
+            )
+
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                "O Tavily retornou uma resposta JSON inválida."
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                "Formato de resposta inválido do Tavily."
+            )
+
+        raw_results = data.get("results")
+
+        if not isinstance(raw_results, list):
+            raise RuntimeError(
+                "A resposta do Tavily não contém uma lista de resultados."
+            )
+
+        results = []
+
+        for item in raw_results:
+            if not isinstance(item, dict):
+                continue
+
+            title = item.get("title")
+            url = item.get("url")
+            snippet = item.get("content", "")
+
+            if not isinstance(title, str):
+                continue
+
+            if not isinstance(url, str):
+                continue
+
+            if not isinstance(snippet, str):
+                snippet = ""
+
+            try:
+                result = SearchResult(
+                    title=title,
+                    url=url,
+                    snippet=snippet[:MAX_SNIPPET_LENGTH],
+                    provider=self.name,
+                )
+            except ValueError:
+                continue
+
+            results.append(result)
+
+            if len(results) >= limit:
+                break
+
+        return results
+
+
 class SearchEngine:
     """Coordena provedores, valida resultados e remove duplicidades."""
 
@@ -197,7 +357,7 @@ class SearchEngine:
 
             provider_results = provider.search(
                 query,
-                limit=remaining,
+                limit=min(remaining, TAVILY_MAX_RESULTS),
             )
 
             for result in provider_results:
@@ -247,3 +407,4 @@ def build_company_queries(company_name: str) -> list[str]:
         f'"{company_name}" oportunidades de emprego',
         f'"{company_name}" página oficial de carreiras',
     ]
+    
