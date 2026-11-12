@@ -140,23 +140,15 @@ def _validate_public_dns(
     successful_responses = 0
 
     for record_type in ("A", "AAAA"):
-        try:
-            remaining = _remaining_time(deadline)
+        remaining = _remaining_time(deadline)
 
+        try:
             answers = resolver.resolve(
                 host,
                 record_type,
                 lifetime=min(3.0, remaining),
                 raise_on_no_answer=False,
             )
-
-            if answers.rrset is None:
-                continue
-
-            successful_responses += 1
-
-            for answer in answers:
-                addresses.add(str(answer))
 
         except dns.resolver.NXDOMAIN as exc:
             raise ValueError(
@@ -175,6 +167,20 @@ def _validate_public_dns(
 
         except dns.resolver.NoAnswer:
             successful_responses += 1
+            continue
+
+        except Exception as exc:
+            raise ValueError(
+                "Ocorreu uma falha inesperada durante a consulta DNS."
+            ) from exc
+
+        if answers.rrset is None:
+            continue
+
+        successful_responses += 1
+
+        for answer in answers:
+            addresses.add(str(answer))
 
     if successful_responses == 0 or not addresses:
         raise ValueError(
@@ -200,8 +206,8 @@ def _validate_public_dns(
         validated.append(resolved_ip.compressed)
 
     return sorted(validated)
+            
     
-
 def _url_with_pinned_ip(url: str, ip: str) -> str:
     """Monta a URL com o IP validado, preservando caminho e consulta."""
 
