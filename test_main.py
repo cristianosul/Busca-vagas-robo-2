@@ -388,3 +388,135 @@ def test_database_initialization_failure(monkeypatch):
     with pytest.raises(RuntimeError):
         with TestClient(main.app):
             pass
+
+
+# =========================
+# PESQUISA WEB COM TAVILY
+# =========================
+
+def test_discovery_without_admin_configuration(client, monkeypatch):
+    monkeypatch.delenv("SOURCE_ADMIN_TOKEN", raising=False)
+
+    response = client.post(
+        "/api/discovery/search?query=empresas+de+tecnologia"
+    )
+
+    assert response.status_code == 503
+
+
+def test_discovery_without_token(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
+    response = client.post(
+        "/api/discovery/search?query=empresas+de+tecnologia"
+    )
+
+    assert response.status_code == 401
+
+
+def test_discovery_invalid_token(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
+    response = client.post(
+        "/api/discovery/search?query=empresas+de+tecnologia",
+        headers={"X-Admin-Token": "token-errado"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_discovery_success_without_real_api_call(
+    client,
+    monkeypatch,
+):
+    from app.search_engine import SearchResult
+
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
+    captured = {}
+
+    class FakeTavilyProvider:
+        name = "tavily"
+
+        def search(self, query, *, limit):
+            captured["query"] = query
+            captured["limit"] = limit
+
+            return [
+                SearchResult(
+                    title="Trabalhe conosco - Empresa Teste",
+                    url="https://empresa.com/carreiras",
+                    snippet="Página oficial de oportunidades.",
+                    provider="tavily",
+                )
+            ]
+
+    monkeypatch.setattr(
+        main,
+        "TavilySearchProvider",
+        FakeTavilyProvider,
+    )
+
+    response = client.post(
+        "/api/discovery/search?query=Empresa+Teste+carreiras&limit=5",
+        headers={"X-Admin-Token": "token-secreto"},
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["provider"] == "tavily"
+    assert data["total"] == 1
+    assert data["saved"] is False
+    assert data["publishing_enabled"] is False
+    assert data["results"][0]["title"] == (
+        "Trabalhe conosco - Empresa Teste"
+    )
+    assert data["results"][0]["url"] == (
+        "https://empresa.com/carreiras"
+    )
+
+    assert captured["query"] == "Empresa Teste carreiras"
+    assert captured["limit"] == 5
+
+
+def test_discovery_missing_api_key(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
+    class FakeTavilyProvider:
+        name = "tavily"
+
+        def search(self, query, *, limit):
+            raise RuntimeError(
+                "A chave TAVILY_API_KEY não foi configurada."
+            )
+
+    monkeypatch.setattr(
+        main,
+        "TavilySearchProvider",
+        FakeTavilyProvider,
+    )
+
+    response = client.post(
+        "/api/discovery/search?query=empresas+de+tecnologia",
+        headers={"X-Admin-Token": "token-secreto"},
+    )
+
+    assert response.status_code == 503
+    assert "TAVILY_API_KEY" in response.json()["detail"]
+
+
+def test_discovery_rejects_limit_above_maximum(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
+    response = client.post(
+        "/api/discovery/search?query=empresas+de+tecnologia&limit=21",
+        headers={"X-Admin-Token": "token-secreto"},
+    )
+
+    assert response.status_code == 422
+    
