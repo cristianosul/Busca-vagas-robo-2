@@ -118,7 +118,13 @@ def get_candidates(
         pattern="^(approved|review|rejected)$",
     ),
     limit: int = Query(default=50, ge=1, le=200),
+    x_admin_token: str | None = Header(
+        default=None,
+        alias="X-Admin-Token",
+    ),
 ):
+    require_source_admin(x_admin_token)
+
     try:
         return list_candidates(status=status, limit=limit)
 
