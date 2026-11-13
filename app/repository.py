@@ -442,8 +442,15 @@ def save_candidate(
 
 
 def save_source(source: SourceCreate):
-    """Armazena uma fonte e suas informações de legitimidade declaradas."""
+    """Armazena uma fonte sempre inicialmente desativada."""
     data = source.model_dump(mode="json")
+
+    if data["enabled"]:
+        raise ValueError(
+            "Uma nova fonte deve ser cadastrada desativada. "
+            "A ativação depende de um processo interno de verificação."
+        )
+
     now = utc_now()
 
     with db_session(immediate=True) as conn:
@@ -477,7 +484,7 @@ def save_source(source: SourceCreate):
                 str(data["authorization_evidence_url"])
                 if data.get("authorization_evidence_url") else None,
                 data["authorization"],
-                data["enabled"],
+                False,
                 data.get("notes"),
                 now,
                 now,
@@ -546,7 +553,13 @@ def list_sources(enabled_only: bool = False, limit: int = 500):
 
 
 def update_source_status(source_id: str, enabled: bool):
-    """Ativa ou desativa uma fonte cadastrada."""
+    """Permite desativar uma fonte, mas bloqueia ativação direta."""
+    if enabled:
+        raise ValueError(
+            "A ativação direta de fontes está bloqueada. "
+            "É necessária uma verificação interna da autorização."
+        )
+
     with db_session(immediate=True) as conn:
         cur = execute(
             conn,
@@ -556,7 +569,7 @@ def update_source_status(source_id: str, enabled: bool):
             WHERE source_id = ?
             RETURNING source_id
             """,
-            (enabled, utc_now(), source_id),
+            (False, utc_now(), source_id),
         )
 
         updated = cur.fetchone()
