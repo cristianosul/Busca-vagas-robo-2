@@ -20,6 +20,10 @@ from app.repository import (
     list_sources,
     update_source_status,
 )
+from app.search_engine import (
+    SearchEngine,
+    TavilySearchProvider,
+)
 
 
 logging.basicConfig(level=logging.INFO)
@@ -27,14 +31,14 @@ logger = logging.getLogger("busca-vagas-robo-2")
 
 
 def require_source_admin(token: str | None):
-    """Protege o gerenciamento de fontes com token administrativo."""
+    """Protege o gerenciamento de fontes e pesquisas."""
 
     expected_token = os.getenv("SOURCE_ADMIN_TOKEN", "").strip()
 
     if not expected_token:
         raise HTTPException(
             status_code=503,
-            detail="Gerenciamento de fontes não configurado.",
+            detail="Gerenciamento administrativo não configurado.",
         )
 
     if not token or not secrets.compare_digest(token, expected_token):
@@ -115,6 +119,85 @@ def get_candidates(
         raise HTTPException(
             status_code=500,
             detail="Não foi possível consultar as oportunidades.",
+        )
+
+
+@app.post("/api/discovery/search")
+def discover_web_results(
+    query: str = Query(
+        ...,
+        min_length=3,
+        max_length=300,
+    ),
+    limit: int = Query(
+        default=10,
+        ge=1,
+        le=20,
+    ),
+    x_admin_token: str | None = Header(
+        default=None,
+        alias="X-Admin-Token",
+    ),
+):
+    """Pesquisa na web sem cadastrar ou publicar oportunidades."""
+
+    require_source_admin(x_admin_token)
+
+    try:
+        engine = SearchEngine(
+            providers=[TavilySearchProvider()]
+        )
+
+        results = engine.search(
+            query=query,
+            limit=limit,
+        )
+
+        return {
+            "query": " ".join(query.split()),
+            "provider": "tavily",
+            "total": len(results),
+            "results": [
+                {
+                    "title": result.title,
+                    "url": result.url,
+                    "snippet": result.snippet,
+                    "provider": result.provider,
+                }
+                for result in results
+            ],
+            "saved": False,
+            "publishing_enabled": False,
+        }
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        ) from exc
+
+    except RuntimeError as exc:
+        message = str(exc)
+
+        if "TAVILY_API_KEY" in message:
+            status_code = 503
+        elif "Limite de utilização" in message:
+            status_code = 429
+        elif "temporariamente indisponível" in message:
+            status_code = 503
+        else:
+            status_code = 502
+
+        raise HTTPException(
+            status_code=status_code,
+            detail=message,
+        ) from exc
+
+    except Exception:
+        logger.exception("Erro inesperado na pesquisa web")
+        raise HTTPException(
+            status_code=500,
+            detail="Não foi possível realizar a pesquisa.",
         )
 
 
@@ -249,3 +332,4 @@ def root():
         ),
         "publishing_enabled": False,
     }
+    
