@@ -1,4 +1,3 @@
-
 import pytest
 from fastapi.testclient import TestClient
 
@@ -59,10 +58,77 @@ def test_root(client):
 
 
 # =========================
+# AUTENTICAÇÃO DE CANDIDATOS
+# =========================
+
+def test_create_candidate_without_configuration(client, monkeypatch):
+    monkeypatch.delenv("SOURCE_ADMIN_TOKEN", raising=False)
+
+    response = client.post(
+        "/api/candidates",
+        json=candidate_payload(),
+    )
+
+    assert response.status_code == 503
+
+
+def test_create_candidate_without_token(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
+    response = client.post(
+        "/api/candidates",
+        json=candidate_payload(),
+    )
+
+    assert response.status_code == 401
+
+
+def test_create_candidate_invalid_token(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
+    response = client.post(
+        "/api/candidates",
+        json=candidate_payload(),
+        headers={"X-Admin-Token": "token-errado"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_get_candidates_without_configuration(client, monkeypatch):
+    monkeypatch.delenv("SOURCE_ADMIN_TOKEN", raising=False)
+
+    response = client.get("/api/candidates")
+
+    assert response.status_code == 503
+
+
+def test_get_candidates_without_token(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
+    response = client.get("/api/candidates")
+
+    assert response.status_code == 401
+
+
+def test_get_candidates_invalid_token(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
+    response = client.get(
+        "/api/candidates",
+        headers={"X-Admin-Token": "token-errado"},
+    )
+
+    assert response.status_code == 401
+
+
+# =========================
 # CADASTRO DE CANDIDATOS
 # =========================
 
 def test_create_candidate(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
     monkeypatch.setattr(
         main,
         "save_candidate",
@@ -75,34 +141,43 @@ def test_create_candidate(client, monkeypatch):
     response = client.post(
         "/api/candidates",
         json=candidate_payload(),
+        headers={"X-Admin-Token": "token-secreto"},
     )
 
     assert response.status_code == 200
     assert response.json()["title"] == "Analista de Sistemas"
 
 
-def test_create_candidate_invalid_data(client):
+def test_create_candidate_invalid_data(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
     response = client.post(
         "/api/candidates",
         json={"title": "AB"},
+        headers={"X-Admin-Token": "token-secreto"},
     )
 
     assert response.status_code == 422
 
 
-def test_create_candidate_rejects_extra_fields(client):
+def test_create_candidate_rejects_extra_fields(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
     payload = candidate_payload()
     payload["company_verified"] = True
 
     response = client.post(
         "/api/candidates",
         json=payload,
+        headers={"X-Admin-Token": "token-secreto"},
     )
 
     assert response.status_code == 422
 
 
 def test_create_candidate_value_error(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
     def fail(candidate):
         raise ValueError("Oportunidade inválida")
 
@@ -111,12 +186,15 @@ def test_create_candidate_value_error(client, monkeypatch):
     response = client.post(
         "/api/candidates",
         json=candidate_payload(),
+        headers={"X-Admin-Token": "token-secreto"},
     )
 
     assert response.status_code == 422
 
 
 def test_create_candidate_internal_error(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
     def fail(candidate):
         raise RuntimeError("Erro interno")
 
@@ -125,6 +203,7 @@ def test_create_candidate_internal_error(client, monkeypatch):
     response = client.post(
         "/api/candidates",
         json=candidate_payload(),
+        headers={"X-Admin-Token": "token-secreto"},
     )
 
     assert response.status_code == 500
@@ -135,19 +214,26 @@ def test_create_candidate_internal_error(client, monkeypatch):
 # =========================
 
 def test_get_candidates(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
     monkeypatch.setattr(
         main,
         "list_candidates",
         lambda status, limit: [],
     )
 
-    response = client.get("/api/candidates")
+    response = client.get(
+        "/api/candidates",
+        headers={"X-Admin-Token": "token-secreto"},
+    )
 
     assert response.status_code == 200
     assert response.json() == []
 
 
 def test_get_candidates_with_filters(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
     def fake_list(status, limit):
         return [{"status": status, "limit": limit}]
 
@@ -158,7 +244,8 @@ def test_get_candidates_with_filters(client, monkeypatch):
     )
 
     response = client.get(
-        "/api/candidates?status=approved&limit=20"
+        "/api/candidates?status=approved&limit=20",
+        headers={"X-Admin-Token": "token-secreto"},
     )
 
     assert response.status_code == 200
@@ -166,29 +253,40 @@ def test_get_candidates_with_filters(client, monkeypatch):
     assert response.json()[0]["limit"] == 20
 
 
-def test_get_candidates_invalid_status(client):
+def test_get_candidates_invalid_status(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
     response = client.get(
-        "/api/candidates?status=invalid"
+        "/api/candidates?status=invalid",
+        headers={"X-Admin-Token": "token-secreto"},
     )
 
     assert response.status_code == 422
 
 
-def test_get_candidates_invalid_limit(client):
+def test_get_candidates_invalid_limit(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
     response = client.get(
-        "/api/candidates?limit=0"
+        "/api/candidates?limit=0",
+        headers={"X-Admin-Token": "token-secreto"},
     )
 
     assert response.status_code == 422
 
 
 def test_get_candidates_internal_error(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
     def fail(status, limit):
         raise RuntimeError("Erro no banco")
 
     monkeypatch.setattr(main, "list_candidates", fail)
 
-    response = client.get("/api/candidates")
+    response = client.get(
+        "/api/candidates",
+        headers={"X-Admin-Token": "token-secreto"},
+    )
 
     assert response.status_code == 500
 
@@ -519,4 +617,3 @@ def test_discovery_rejects_limit_above_maximum(
     )
 
     assert response.status_code == 422
-    
