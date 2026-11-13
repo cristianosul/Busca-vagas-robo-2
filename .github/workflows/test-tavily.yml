@@ -1,0 +1,68 @@
+
+name: Teste real de pesquisa Tavily
+
+on:
+  workflow_dispatch:
+    inputs:
+      query:
+        description: "O que o Robô 2 deve pesquisar?"
+        required: true
+        default: "empresas de tecnologia no Brasil trabalhe conosco vagas"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  search:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Baixar código
+        uses: actions/checkout@v4
+
+      - name: Preparar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependência
+        run: python -m pip install httpx
+
+      - name: Executar pesquisa real
+        env:
+          TAVILY_API_KEY: ${{ secrets.TAVILY_API_KEY }}
+          SEARCH_QUERY: ${{ inputs.query }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+
+          from app.search_engine import TavilySearchProvider
+
+          if not os.getenv("TAVILY_API_KEY", "").strip():
+              print("ERRO: Secret TAVILY_API_KEY não configurado.")
+              sys.exit(1)
+
+          query = os.environ["SEARCH_QUERY"]
+
+          print("Iniciando pesquisa real...")
+          print("Consulta:", query)
+
+          provider = TavilySearchProvider()
+          results = provider.search(query, limit=5)
+
+          print("\nRESULTADOS ENCONTRADOS:", len(results))
+
+          for index, result in enumerate(results, start=1):
+              print(f"\n--- RESULTADO {index} ---")
+              print("Título:", result.title)
+              print("URL:", result.url)
+              print("Descrição:", result.snippet[:500])
+
+          print("\nPesquisa concluída.")
+          print("Vagas cadastradas: 0")
+          print("Publicação automática: desativada")
+          PY
+          
