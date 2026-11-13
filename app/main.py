@@ -85,7 +85,15 @@ def health():
 
 
 @app.post("/api/candidates")
-def create_candidate(candidate: CandidateIn):
+def create_candidate(
+    candidate: CandidateIn,
+    x_admin_token: str | None = Header(
+        default=None,
+        alias="X-Admin-Token",
+    ),
+):
+    require_source_admin(x_admin_token)
+
     try:
         return save_candidate(candidate)
 
@@ -101,7 +109,7 @@ def create_candidate(candidate: CandidateIn):
             status_code=500,
             detail="Não foi possível registrar a oportunidade.",
         )
-
+        
 
 @app.get("/api/candidates")
 def get_candidates(
