@@ -118,6 +118,61 @@ def execute(conn, sql, params=()):
     return conn.execute(sql, params)
 
 
+def _get_table_columns(conn, table_name: str) -> set[str]:
+    """Obtém as colunas existentes em SQLite ou PostgreSQL."""
+    if table_name not in {"candidates", "sources"}:
+        raise ValueError("Tabela não permitida para inspeção.")
+
+    if DATABASE_URL:
+        rows = conn.execute(
+            """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = ?
+            """,
+            (table_name,),
+        ).fetchall()
+
+        return {row["column_name"] for row in rows}
+
+    rows = conn.execute(
+        f"PRAGMA table_info({table_name})"
+    ).fetchall()
+
+    return {row["name"] for row in rows}
+
+
+def _ensure_column(
+    conn,
+    table_name: str,
+    column_name: str,
+    column_definition: str,
+):
+    """Adiciona uma coluna somente quando ela ainda não existe."""
+    allowed_columns = {
+        "candidates": {
+            "normalized_url",
+            "evidence_json",
+        },
+        "sources": {
+            "official_site_url",
+            "authorization_evidence_url",
+        },
+    }
+
+    if column_name not in allowed_columns.get(table_name, set()):
+        raise ValueError("Coluna não permitida para migração.")
+
+    columns = _get_table_columns(conn, table_name)
+
+    if column_name not in columns:
+        conn.execute(
+            f"ALTER TABLE {table_name} "
+            f"ADD COLUMN {column_name} {column_definition}"
+        )
+
+
 def serialize_source(row):
     """Padroniza os dados da fonte entre SQLite e PostgreSQL."""
     if row is None:
@@ -130,7 +185,7 @@ def serialize_source(row):
 
 
 def init_db():
-    """Cria e atualiza as tabelas do Robô 2 sem apagar vagas."""
+    """Cria e atualiza as tabelas sem apagar registros existentes."""
     with db_session() as conn:
         if DATABASE_URL:
             conn.execute("""
@@ -150,6 +205,7 @@ def init_db():
                         CHECK(status IN ('approved', 'review', 'rejected')),
                     reasons_json TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL
                 )
             """)
@@ -160,6 +216,8 @@ def init_db():
                     name TEXT NOT NULL,
                     source_type TEXT NOT NULL,
                     base_url TEXT NOT NULL,
+                    official_site_url TEXT,
+                    authorization_evidence_url TEXT,
                     "authorization" TEXT NOT NULL,
                     enabled BOOLEAN NOT NULL DEFAULT FALSE,
                     notes TEXT,
@@ -185,6 +243,7 @@ def init_db():
                         CHECK(status IN ('approved', 'review', 'rejected')),
                     reasons_json TEXT NOT NULL,
                     payload_json TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL DEFAULT '{}',
                     created_at TEXT NOT NULL
                 )
             """)
@@ -195,6 +254,8 @@ def init_db():
                     name TEXT NOT NULL,
                     source_type TEXT NOT NULL,
                     base_url TEXT NOT NULL,
+                    official_site_url TEXT,
+                    authorization_evidence_url TEXT,
                     "authorization" TEXT NOT NULL,
                     enabled INTEGER NOT NULL DEFAULT 0,
                     notes TEXT,
@@ -203,28 +264,34 @@ def init_db():
                 )
             """)
 
-        if DATABASE_URL:
-            columns = {
-                row["column_name"]
-                for row in conn.execute("""
-                    SELECT column_name
-                    FROM information_schema.columns
-                    WHERE table_schema = current_schema()
-                    AND table_name = 'candidates'
-                """).fetchall()
-            }
-        else:
-            columns = {
-                row["name"]
-                for row in conn.execute(
-                    "PRAGMA table_info(candidates)"
-                ).fetchall()
-            }
+        # Migração compatível com bancos antigos.
+        _ensure_column(
+            conn,
+            "candidates",
+            "normalized_url",
+            "TEXT",
+        )
 
-        if "normalized_url" not in columns:
-            conn.execute(
-                "ALTER TABLE candidates ADD COLUMN normalized_url TEXT"
-            )
+        _ensure_column(
+            conn,
+            "candidates",
+            "evidence_json",
+            "TEXT NOT NULL DEFAULT '{}'",
+        )
+
+        _ensure_column(
+            conn,
+            "sources",
+            "official_site_url",
+            "TEXT",
+        )
+
+        _ensure_column(
+            conn,
+            "sources",
+            "authorization_evidence_url",
+            "TEXT",
+        )
 
         rows = execute(
             conn,
@@ -285,16 +352,19 @@ def init_db():
             ON sources(enabled)
         """)
 
-                    
+
 def save_candidate(
     candidate: CandidateIn,
     evidence: CandidateEvidence | None = None,
 ):
+    """Salva oportunidade, pontuação e evidências individuais."""
     evidence = evidence or CandidateEvidence()
 
     score, status, reasons = score_candidate(evidence)
 
     payload = candidate.model_dump(mode="json")
+    evidence_payload = evidence.model_dump(mode="json")
+
     created_at = utc_now()
 
     original_url = str(candidate.original_job_url)
@@ -307,9 +377,10 @@ def save_candidate(
             INSERT INTO candidates (
                 title, company, location, mode, source_name, source_url,
                 original_job_url, normalized_url, application_url, score,
-                status, reasons_json, payload_json, created_at
+                status, reasons_json, payload_json, evidence_json,
+                created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(normalized_url) DO NOTHING
             RETURNING id
             """,
@@ -328,6 +399,7 @@ def save_candidate(
                 status,
                 json.dumps(reasons, ensure_ascii=False),
                 json.dumps(payload, ensure_ascii=False),
+                json.dumps(evidence_payload, ensure_ascii=False),
                 created_at,
             ),
         )
@@ -370,7 +442,7 @@ def save_candidate(
 
 
 def save_source(source: SourceCreate):
-    """Armazena uma fonte de forma permanente."""
+    """Armazena uma fonte e suas informações de legitimidade declaradas."""
     data = source.model_dump(mode="json")
     now = utc_now()
 
@@ -379,10 +451,19 @@ def save_source(source: SourceCreate):
             conn,
             """
             INSERT INTO sources (
-                source_id, name, source_type, base_url,
-                "authorization", enabled, notes, created_at, updated_at
+                source_id,
+                name,
+                source_type,
+                base_url,
+                official_site_url,
+                authorization_evidence_url,
+                "authorization",
+                enabled,
+                notes,
+                created_at,
+                updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_id) DO NOTHING
             RETURNING source_id
             """,
@@ -391,6 +472,10 @@ def save_source(source: SourceCreate):
                 data["name"],
                 data["source_type"],
                 str(data["base_url"]),
+                str(data["official_site_url"])
+                if data.get("official_site_url") else None,
+                str(data["authorization_evidence_url"])
+                if data.get("authorization_evidence_url") else None,
                 data["authorization"],
                 data["enabled"],
                 data.get("notes"),
@@ -483,6 +568,7 @@ def update_source_status(source_id: str, enabled: bool):
 
 
 def list_candidates(status: str | None = None, limit: int = 50):
+    """Lista oportunidades incluindo os dados e evidências armazenados."""
     limit = max(1, min(int(limit), 500))
 
     with db_session() as conn:
@@ -510,20 +596,33 @@ def list_candidates(status: str | None = None, limit: int = 50):
                 (limit,),
             ).fetchall()
 
-    return [
-        {
+    results = []
+
+    for row in rows:
+        payload = json.loads(row["payload_json"] or "{}")
+        evidence = json.loads(row["evidence_json"] or "{}")
+
+        results.append({
             "id": row["id"],
             "title": row["title"],
             "company": row["company"],
             "location": row["location"],
             "mode": row["mode"],
             "source_name": row["source_name"],
+            "source_url": row["source_url"],
             "original_job_url": row["original_job_url"],
             "application_url": row["application_url"],
+            "employment_type": payload.get("employment_type"),
+            "advertiser_company": payload.get("advertiser_company"),
+            "hiring_company": payload.get("hiring_company"),
+            "intermediary_name": payload.get("intermediary_name"),
+            "date_posted": payload.get("date_posted"),
+            "valid_through": payload.get("valid_through"),
             "score": row["score"],
             "status": row["status"],
             "reasons": json.loads(row["reasons_json"]),
+            "evidence": evidence,
             "created_at": row["created_at"],
-        }
-        for row in rows
-    ]
+        })
+
+    return results
