@@ -1,36 +1,16 @@
 
 from dataclasses import dataclass
-from typing import Literal
 
-from app.models import SourceCreate
+from app.models import (
+    AuthorizationType,
+    SourceCreate,
+    SourceType,
+)
 from app.repository import (
     get_source_record,
     list_sources,
     save_source,
 )
-
-
-SourceType = Literal[
-    "company",
-    "greenhouse",
-    "lever",
-    "ashby",
-    "smartrecruiters",
-    "gupy",
-    "job_portal",
-    "regional",
-    "municipal",
-    "sitemap",
-    "structured_data",
-]
-
-AuthorizationType = Literal[
-    "official_public_api",
-    "official_public_page",
-    "public_sitemap",
-    "public_structured_data",
-    "written_permission",
-]
 
 
 @dataclass(frozen=True)
@@ -42,6 +22,8 @@ class Source:
     authorization: AuthorizationType
     enabled: bool = False
     notes: str | None = None
+    official_site_url: str | None = None
+    authorization_evidence_url: str | None = None
 
 
 def _to_model(source: Source) -> SourceCreate:
@@ -53,6 +35,8 @@ def _to_model(source: Source) -> SourceCreate:
         authorization=source.authorization,
         enabled=source.enabled,
         notes=source.notes,
+        official_site_url=source.official_site_url,
+        authorization_evidence_url=source.authorization_evidence_url,
     )
 
 
@@ -65,6 +49,10 @@ def _to_source(record: dict) -> Source:
         authorization=record["authorization"],
         enabled=bool(record["enabled"]),
         notes=record.get("notes"),
+        official_site_url=record.get("official_site_url"),
+        authorization_evidence_url=record.get(
+            "authorization_evidence_url"
+        ),
     )
 
 
@@ -91,3 +79,4 @@ def register_source(source: Source) -> Source:
     save_source(model)
 
     return get_source(source.source_id) or source
+    
