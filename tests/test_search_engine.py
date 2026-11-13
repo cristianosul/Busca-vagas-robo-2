@@ -512,6 +512,6 @@ def test_tavily_search_rejects_invalid_json_response(monkeypatch):
 
     provider = TavilySearchProvider(api_key="chave-teste")
 
-    with pytest.raises(RuntimeError, match="JSON inválido"):
+    with pytest.raises(RuntimeError, match="resposta JSON inválida"):
         provider.search("vagas de emprego", limit=5)
         
