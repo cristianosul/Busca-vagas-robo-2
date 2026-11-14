@@ -1,3 +1,4 @@
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -420,7 +421,47 @@ def test_get_source_not_found(client, monkeypatch):
 # ATUALIZAÇÃO DE FONTES
 # =========================
 
-def test_update_source_status(client, monkeypatch):
+def test_update_source_status_blocks_activation(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
+    monkeypatch.setattr(
+        main,
+        "get_source_record",
+        lambda source_id: {
+            "source_id": source_id,
+            "enabled": False,
+        },
+    )
+
+    response = client.patch(
+        "/api/sources/empresa-teste",
+        json={"enabled": True},
+        headers={"X-Admin-Token": "token-secreto"},
+    )
+
+    assert response.status_code == 403
+    assert "verificação interna" in response.json()["detail"]
+
+
+def test_update_source_not_found(client, monkeypatch):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
+    monkeypatch.setattr(
+        main,
+        "get_source_record",
+        lambda source_id: None,
+    )
+
+    response = client.patch(
+        "/api/sources/inexistente",
+        json={"enabled": True},
+        headers={"X-Admin-Token": "token-secreto"},
+    )
+
+    assert response.status_code == 404
+
+
+def test_deactivate_source(client, monkeypatch):
     monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
 
     monkeypatch.setattr(
@@ -434,30 +475,12 @@ def test_update_source_status(client, monkeypatch):
 
     response = client.patch(
         "/api/sources/empresa-teste",
-        json={"enabled": True},
+        json={"enabled": False},
         headers={"X-Admin-Token": "token-secreto"},
     )
 
     assert response.status_code == 200
-    assert response.json()["enabled"] is True
-
-
-def test_update_source_not_found(client, monkeypatch):
-    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
-
-    monkeypatch.setattr(
-        main,
-        "update_source_status",
-        lambda source_id, enabled: None,
-    )
-
-    response = client.patch(
-        "/api/sources/inexistente",
-        json={"enabled": True},
-        headers={"X-Admin-Token": "token-secreto"},
-    )
-
-    assert response.status_code == 404
+    assert response.json()["enabled"] is False
 
 
 def test_update_source_rejects_extra_fields(client):
@@ -617,3 +640,4 @@ def test_discovery_rejects_limit_above_maximum(
     )
 
     assert response.status_code == 422
+    
