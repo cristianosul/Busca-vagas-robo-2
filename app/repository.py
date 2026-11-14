@@ -124,7 +124,8 @@ def _get_table_columns(conn, table_name: str) -> set[str]:
         raise ValueError("Tabela não permitida para inspeção.")
 
     if DATABASE_URL:
-        rows = conn.execute(
+        rows = execute(
+            conn,
             """
             SELECT column_name
             FROM information_schema.columns
@@ -141,7 +142,7 @@ def _get_table_columns(conn, table_name: str) -> set[str]:
     ).fetchall()
 
     return {row["name"] for row in rows}
-
+    
 
 def _ensure_column(
     conn,
