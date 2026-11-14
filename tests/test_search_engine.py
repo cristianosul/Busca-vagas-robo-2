@@ -2,6 +2,7 @@ import pytest
 
 from app.search_engine import (
     SearchEngine,
+    SearchProviderError,
     SearchResult,
     TavilySearchProvider,
     build_company_queries,
@@ -514,4 +515,183 @@ def test_tavily_search_rejects_invalid_json_response(monkeypatch):
 
     with pytest.raises(RuntimeError, match="resposta JSON inválida"):
         provider.search("vagas de emprego", limit=5)
-        
+
+
+def test_search_engine_continues_after_provider_failure():
+    class FailingProvider:
+        name = "Failing"
+
+        def search(self, query, *, limit):
+            raise SearchProviderError("Provedor indisponível")
+
+    working = FakeProvider(
+        "Working",
+        [
+            SearchResult(
+                title="Vaga encontrada",
+                url="https://example.com/jobs/1",
+            ),
+        ],
+    )
+
+    engine = SearchEngine([FailingProvider(), working])
+
+    results = engine.search("vagas Python")
+
+    assert len(results) == 1
+    assert results[0].title == "Vaga encontrada"
+    assert working.queries == [("vagas Python", 50)]
+
+
+def test_search_engine_raises_when_all_providers_fail():
+    class FailingProvider:
+        def __init__(self, name):
+            self.name = name
+
+        def search(self, query, *, limit):
+            raise SearchProviderError(
+                f"{self.name} indisponível"
+            )
+
+    engine = SearchEngine(
+        [
+            FailingProvider("First"),
+            FailingProvider("Second"),
+        ]
+    )
+
+    with pytest.raises(SearchProviderError):
+        engine.search("vagas Python")
+
+
+def test_tavily_search_handles_timeout(monkeypatch):
+    import app.search_engine as search_module
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, *args, **kwargs):
+            raise search_module.httpx.TimeoutException(
+                "Tempo esgotado"
+            )
+
+    monkeypatch.setattr(
+        search_module.httpx,
+        "Client",
+        FakeClient,
+    )
+
+    provider = TavilySearchProvider(api_key="chave-teste")
+
+    with pytest.raises(SearchProviderError):
+        provider.search("vagas de emprego", limit=5)
+
+
+def test_tavily_search_rejects_http_redirect(monkeypatch):
+    import app.search_engine as search_module
+
+    class FakeResponse:
+        status_code = 302
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        search_module.httpx,
+        "Client",
+        FakeClient,
+    )
+
+    provider = TavilySearchProvider(api_key="chave-teste")
+
+    with pytest.raises(SearchProviderError):
+        provider.search("vagas de emprego", limit=5)
+
+
+def test_tavily_search_rejects_unexpected_json_structure(
+    monkeypatch,
+):
+    import app.search_engine as search_module
+
+    class FakeResponse:
+        status_code = 200
+
+        def json(self):
+            return {
+                "unexpected": "estrutura inválida",
+            }
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def post(self, *args, **kwargs):
+            return FakeResponse()
+
+    monkeypatch.setattr(
+        search_module.httpx,
+        "Client",
+        FakeClient,
+    )
+
+    provider = TavilySearchProvider(api_key="chave-teste")
+
+    with pytest.raises(SearchProviderError):
+        provider.search("vagas de emprego", limit=5)
+
+
+def test_search_engine_removes_equivalent_normalized_urls():
+    first = FakeProvider(
+        "First",
+        [
+            SearchResult(
+                title="Vaga original",
+                url=(
+                    "https://EXAMPLE.com/jobs/1"
+                    "?utm_source=google&id=10#top"
+                ),
+            ),
+        ],
+    )
+
+    second = FakeProvider(
+        "Second",
+        [
+            SearchResult(
+                title="Vaga duplicada",
+                url="https://example.com/jobs/1?id=10",
+            ),
+        ],
+    )
+
+    engine = SearchEngine([first, second])
+
+    results = engine.search("vagas")
+
+    assert len(results) == 1
+    assert results[0].title == "Vaga original"
+    assert results[0].url == "https://example.com/jobs/1?id=10"
+    
