@@ -546,13 +546,7 @@ def list_sources(enabled_only: bool = False, limit: int = 500):
 
 
 def update_source_status(source_id: str, enabled: bool):
-    """Permite desativar uma fonte, mas bloqueia ativação direta."""
-    if enabled:
-        raise ValueError(
-            "A ativação direta de fontes está bloqueada. "
-            "É necessária uma verificação interna da autorização."
-        )
-
+    """Ativa ou desativa uma fonte cadastrada."""
     with db_session(immediate=True) as conn:
         cur = execute(
             conn,
@@ -562,7 +556,7 @@ def update_source_status(source_id: str, enabled: bool):
             WHERE source_id = ?
             RETURNING source_id
             """,
-            (False, utc_now(), source_id),
+            (enabled, utc_now(), source_id),
         )
 
         updated = cur.fetchone()
@@ -571,7 +565,7 @@ def update_source_status(source_id: str, enabled: bool):
         return None
 
     return get_source_record(source_id)
-
+    
 
 def list_candidates(status: str | None = None, limit: int = 50):
     """Lista oportunidades incluindo os dados e evidências armazenados."""
