@@ -193,3 +193,258 @@ def test_update_source_status_returns_none_for_missing_source(
     )
 
     assert result is None
+
+
+def test_list_candidates_preserves_all_evidence(isolated_db):
+    evidence = CandidateEvidence(
+        company_verified=True,
+        original_page_verified=True,
+        application_link_verified=True,
+        job_content_verified=True,
+        date_verified=True,
+    )
+
+    repository.save_candidate(make_candidate(), evidence)
+
+    results = repository.list_candidates()
+
+    assert len(results) == 1
+    assert results[0]["score"] == 100
+    assert results[0]["status"] == "approved"
+
+    saved_evidence = results[0]["evidence"]
+
+    assert saved_evidence["company_verified"] is True
+    assert saved_evidence["original_page_verified"] is True
+    assert saved_evidence["application_link_verified"] is True
+    assert saved_evidence["job_content_verified"] is True
+    assert saved_evidence["date_verified"] is True
+
+
+def test_list_candidates_preserves_company_relationships(isolated_db):
+    data = make_candidate().model_dump()
+    data.update({
+        "advertiser_company": "Agência Anunciante",
+        "hiring_company": "Empresa Contratante",
+        "intermediary_name": "Consultoria Intermediária",
+    })
+
+    candidate = CandidateIn(**data)
+
+    repository.save_candidate(candidate)
+
+    result = repository.list_candidates()[0]
+
+    assert result["advertiser_company"] == "Agência Anunciante"
+    assert result["hiring_company"] == "Empresa Contratante"
+    assert result["intermediary_name"] == "Consultoria Intermediária"
+
+
+def test_list_sources_filters_enabled_sources(isolated_db):
+    repository.save_source(make_source("empresa-1"))
+    repository.save_source(make_source("empresa-2"))
+
+    repository.update_source_status("empresa-2", True)
+
+    enabled = repository.list_sources(enabled_only=True)
+
+    assert len(enabled) == 1
+    assert enabled[0]["source_id"] == "empresa-2"
+    assert enabled[0]["enabled"] is True
+
+
+def test_candidate_insert_failure_rolls_back(isolated_db, monkeypatch):
+    original_execute = repository.execute
+
+    def failing_execute(conn, sql, params=()):
+        if "INSERT INTO candidates" in sql:
+            raise RuntimeError("Falha simulada na gravação")
+
+        return original_execute(conn, sql, params)
+
+    monkeypatch.setattr(repository, "execute", failing_execute)
+
+    with pytest.raises(RuntimeError, match="Falha simulada"):
+        repository.save_candidate(make_candidate())
+
+    monkeypatch.setattr(repository, "execute", original_execute)
+
+    with repository.connect() as conn:
+        row = repository.execute(
+            conn,
+            "SELECT COUNT(*) AS total FROM candidates",
+        ).fetchone()
+
+    assert row["total"] == 0
+
+
+def test_init_db_migrates_legacy_database(tmp_path, monkeypatch):
+    db_path = tmp_path / "legacy.db"
+
+    monkeypatch.setattr(repository, "DATABASE_URL", "")
+    monkeypatch.setattr(repository, "DB_PATH", db_path)
+
+    import sqlite3
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""
+            CREATE TABLE candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                company TEXT NOT NULL,
+                location TEXT,
+                mode TEXT NOT NULL,
+                source_name TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                original_job_url TEXT NOT NULL,
+                application_url TEXT,
+                score INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                reasons_json TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE sources (
+                source_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                "authorization" TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
+        conn.execute("""
+            INSERT INTO candidates (
+                title, company, location, mode, source_name,
+                source_url, original_job_url, application_url,
+                score, status, reasons_json, payload_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            "Vaga antiga",
+            "Empresa antiga",
+            "Brasil",
+            "Não informado",
+            "Fonte antiga",
+            "https://example.com/careers",
+            "https://example.com/jobs/123",
+            None,
+            0,
+            "review",
+            "[]",
+            "{}",
+            "2026-01-01T00:00:00+00:00",
+        ))
+
+    repository.init_db()
+
+    with repository.connect() as conn:
+        candidate_columns = repository._get_table_columns(
+            conn, "candidates"
+        )
+        source_columns = repository._get_table_columns(
+            conn, "sources"
+        )
+
+        row = repository.execute(
+            conn,
+            "SELECT normalized_url FROM candidates WHERE id = ?",
+            (1,),
+        ).fetchone()
+
+    assert "normalized_url" in candidate_columns
+    assert "evidence_json" in candidate_columns
+    assert "official_site_url" in source_columns
+    assert "authorization_evidence_url" in source_columns
+    assert row["normalized_url"] == "https://example.com/jobs/123"
+
+
+def test_init_db_stops_on_duplicate_normalized_urls(
+    tmp_path,
+    monkeypatch,
+):
+    import sqlite3
+
+    db_path = tmp_path / "duplicate_legacy.db"
+
+    monkeypatch.setattr(repository, "DATABASE_URL", "")
+    monkeypatch.setattr(repository, "DB_PATH", db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""
+            CREATE TABLE candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                company TEXT NOT NULL,
+                location TEXT,
+                mode TEXT NOT NULL,
+                source_name TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                original_job_url TEXT NOT NULL,
+                application_url TEXT,
+                score INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                reasons_json TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE sources (
+                source_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                "authorization" TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
+        for url in (
+            "https://example.com/jobs/123?utm_source=google",
+            "https://example.com/jobs/123",
+        ):
+            conn.execute("""
+                INSERT INTO candidates (
+                    title, company, location, mode, source_name,
+                    source_url, original_job_url, application_url,
+                    score, status, reasons_json, payload_json, created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                "Vaga antiga",
+                "Empresa antiga",
+                "Brasil",
+                "Não informado",
+                "Fonte antiga",
+                "https://example.com/careers",
+                url,
+                None,
+                0,
+                "review",
+                "[]",
+                "{}",
+                "2026-01-01T00:00:00+00:00",
+            ))
+
+    with pytest.raises(RuntimeError, match="URLs normalizadas duplicadas"):
+        repository.init_db()
+
+    with sqlite3.connect(db_path) as conn:
+        total = conn.execute(
+            "SELECT COUNT(*) FROM candidates"
+        ).fetchone()[0]
+
+    assert total == 2
+    
