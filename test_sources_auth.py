@@ -1,3 +1,4 @@
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -30,7 +31,7 @@ def source_payload():
         "source_type": "company",
         "base_url": "https://example.com/careers",
         "authorization": "official_public_page",
-        "enabled": True,
+        "enabled": False,
     }
 
 
@@ -62,7 +63,7 @@ def test_missing_admin_configuration_returns_503(client, monkeypatch):
     assert response.status_code == 503
 
 
-def test_valid_token_can_register_and_list_source(client):
+def test_register_and_list_disabled_source(client):
     created = client.post(
         "/api/sources",
         json=source_payload(),
@@ -71,6 +72,7 @@ def test_valid_token_can_register_and_list_source(client):
 
     assert created.status_code == 201
     assert created.json()["source_id"] == "empresa-seguranca"
+    assert created.json()["enabled"] in (False, 0)
 
     listed = client.get(
         "/api/sources",
@@ -84,12 +86,28 @@ def test_valid_token_can_register_and_list_source(client):
     )
 
 
+def test_registration_with_enabled_true_is_blocked(client):
+    payload = source_payload()
+    payload["enabled"] = True
+
+    response = client.post(
+        "/api/sources",
+        json=payload,
+        headers=admin_headers(),
+    )
+
+    assert response.status_code == 403
+    assert "desativada" in response.json()["detail"].lower()
+
+
 def test_can_get_source_by_id(client):
-    client.post(
+    created = client.post(
         "/api/sources",
         json=source_payload(),
         headers=admin_headers(),
     )
+
+    assert created.status_code == 201
 
     response = client.get(
         "/api/sources/empresa-seguranca",
@@ -98,14 +116,17 @@ def test_can_get_source_by_id(client):
 
     assert response.status_code == 200
     assert response.json()["source_id"] == "empresa-seguranca"
+    assert response.json()["enabled"] in (False, 0)
 
 
-def test_can_activate_and_deactivate_source(client):
-    client.post(
+def test_activation_is_blocked_and_deactivation_is_allowed(client):
+    created = client.post(
         "/api/sources",
         json=source_payload(),
         headers=admin_headers(),
     )
+
+    assert created.status_code == 201
 
     deactivated = client.patch(
         "/api/sources/empresa-seguranca",
@@ -122,8 +143,8 @@ def test_can_activate_and_deactivate_source(client):
         headers=admin_headers(),
     )
 
-    assert activated.status_code == 200
-    assert activated.json()["enabled"] in (True, 1)
+    assert activated.status_code == 403
+    assert "verificação interna" in activated.json()["detail"].lower()
 
 
 def test_missing_source_returns_404(client):
@@ -143,3 +164,4 @@ def test_updating_missing_source_returns_404(client):
     )
 
     assert response.status_code == 404
+    
