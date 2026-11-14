@@ -24,23 +24,33 @@ def utc_now() -> str:
 
 
 def normalize_job_url(value: str) -> str:
-    """Remove fragmentos e parâmetros de rastreamento."""
-    parts = urlsplit(str(value).strip())
-    scheme = parts.scheme.lower()
-    hostname = (parts.hostname or "").lower()
+    """Remove rastreamento e normaliza URLs, rejeitando formatos inválidos."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("URL original inválida.")
+
+    try:
+        parts = urlsplit(value.strip())
+
+        scheme = parts.scheme.lower()
+        hostname = (parts.hostname or "").lower()
+        port = parts.port
+
+    except ValueError as exc:
+        raise ValueError("URL original malformada.") from exc
 
     if scheme not in {"http", "https"} or not hostname:
         raise ValueError("URL original sem hostname válido.")
 
-    try:
-        port = parts.port
-    except ValueError as exc:
-        raise ValueError("Porta inválida na URL original.") from exc
+    if parts.username is not None or parts.password is not None:
+        raise ValueError("URL original não pode conter credenciais.")
+
+    if port is not None and not 1 <= port <= 65535:
+        raise ValueError("Porta inválida na URL original.")
 
     if ":" in hostname:
         hostname = f"[{hostname}]"
 
-    if port and not (
+    if port is not None and not (
         (scheme == "https" and port == 443)
         or (scheme == "http" and port == 80)
     ):
@@ -49,8 +59,9 @@ def normalize_job_url(value: str) -> str:
         netloc = hostname
 
     path = parts.path or "/"
+
     if path != "/":
-        path = path.rstrip("/")
+        path = path.rstrip("/") or "/"
 
     query_items = []
 
@@ -65,7 +76,7 @@ def normalize_job_url(value: str) -> str:
     query = urlencode(sorted(query_items))
 
     return urlunsplit((scheme, netloc, path, query, ""))
-
+    
 
 def connect():
     """Conecta ao Neon ou ao SQLite local."""
