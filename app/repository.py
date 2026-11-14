@@ -442,15 +442,8 @@ def save_candidate(
 
 
 def save_source(source: SourceCreate):
-    """Armazena uma fonte sempre inicialmente desativada."""
+    """Armazena uma fonte e suas informações de legitimidade declaradas."""
     data = source.model_dump(mode="json")
-
-    if data["enabled"]:
-        raise ValueError(
-            "Uma nova fonte deve ser cadastrada desativada. "
-            "A ativação depende de um processo interno de verificação."
-        )
-
     now = utc_now()
 
     with db_session(immediate=True) as conn:
@@ -484,7 +477,7 @@ def save_source(source: SourceCreate):
                 str(data["authorization_evidence_url"])
                 if data.get("authorization_evidence_url") else None,
                 data["authorization"],
-                False,
+                data["enabled"],
                 data.get("notes"),
                 now,
                 now,
@@ -499,7 +492,7 @@ def save_source(source: SourceCreate):
             )
 
     return get_source_record(data["source_id"])
-
+    
 
 def get_source_record(source_id: str):
     """Consulta uma fonte pelo identificador."""
