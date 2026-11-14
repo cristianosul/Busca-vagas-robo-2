@@ -1,6 +1,7 @@
 
 import ipaddress
 import os
+import re
 from dataclasses import dataclass
 from typing import Protocol, Sequence
 from urllib.parse import (
@@ -17,6 +18,7 @@ MAX_QUERY_LENGTH = 300
 MAX_RESULTS = 50
 MAX_TITLE_LENGTH = 300
 MAX_SNIPPET_LENGTH = 2000
+MAX_URL_LENGTH = 2048
 
 TAVILY_ENDPOINT = "https://api.tavily.com/search"
 TAVILY_TIMEOUT = 15.0
@@ -31,18 +33,34 @@ TRACKING_PARAMETERS = {
 }
 
 
+class SearchProviderError(RuntimeError):
+    """Falha operacional de um provedor de pesquisa."""
+
+
 def normalize_search_url(url: str) -> str:
     """Valida e normaliza uma URL HTTPS encontrada na pesquisa."""
 
     if not isinstance(url, str) or not url.strip():
         raise ValueError("URL de pesquisa inválida.")
 
-    parsed = urlsplit(url.strip())
+    url = url.strip()
+
+    if len(url) > MAX_URL_LENGTH:
+        raise ValueError("URL de pesquisa muito longa.")
+
+    if any(ord(char) <= 32 or ord(char) == 127 for char in url):
+        raise ValueError("A URL contém caracteres inválidos.")
+
+    try:
+        parsed = urlsplit(url)
+        hostname = parsed.hostname
+    except ValueError as exc:
+        raise ValueError("Formato de URL inválido.") from exc
 
     if parsed.scheme.lower() != "https":
         raise ValueError("Somente URLs HTTPS são permitidas.")
 
-    if not parsed.hostname:
+    if not hostname:
         raise ValueError("A URL precisa possuir um domínio.")
 
     if parsed.username or parsed.password:
@@ -56,7 +74,10 @@ def normalize_search_url(url: str) -> str:
     if port not in (None, 443):
         raise ValueError("Somente a porta HTTPS padrão é permitida.")
 
-    host = parsed.hostname.lower().rstrip(".")
+    host = hostname.lower().rstrip(".")
+
+    if not host:
+        raise ValueError("A URL precisa possuir um domínio válido.")
 
     if host == "localhost" or host.endswith(".localhost"):
         raise ValueError("Domínio local não permitido.")
@@ -66,8 +87,34 @@ def normalize_search_url(url: str) -> str:
     except ValueError:
         address = None
 
-    if address is not None and not address.is_global:
-        raise ValueError("Endereço IP não público.")
+    if address is not None:
+        if not address.is_global:
+            raise ValueError("Endereço IP não público.")
+
+        host = address.compressed
+    else:
+        try:
+            ascii_host = host.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise ValueError("Domínio inválido na URL.") from exc
+
+        if len(ascii_host) > 253:
+            raise ValueError("Domínio muito longo.")
+
+        labels = ascii_host.split(".")
+
+        if any(
+            not label
+            or len(label) > 63
+            or not re.fullmatch(
+                r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?",
+                label,
+            )
+            for label in labels
+        ):
+            raise ValueError("Domínio inválido na URL.")
+
+        host = ascii_host
 
     query_parameters = []
 
@@ -191,7 +238,7 @@ class TavilySearchProvider:
             )
 
         if not self.api_key:
-            raise RuntimeError(
+            raise SearchProviderError(
                 "A chave TAVILY_API_KEY não foi configurada."
             )
 
@@ -222,51 +269,56 @@ class TavilySearchProvider:
                 )
 
         except httpx.TimeoutException as exc:
-            raise RuntimeError(
+            raise SearchProviderError(
                 "O Tavily demorou demais para responder."
             ) from exc
 
         except httpx.RequestError as exc:
-            raise RuntimeError(
+            raise SearchProviderError(
                 "Não foi possível conectar ao serviço de pesquisa."
             ) from exc
 
+        if 300 <= response.status_code < 400:
+            raise SearchProviderError(
+                "O Tavily retornou um redirecionamento inesperado."
+            )
+
         if response.status_code in (401, 403):
-            raise RuntimeError(
+            raise SearchProviderError(
                 "O Tavily recusou a autenticação. Verifique a chave API."
             )
 
         if response.status_code == 429:
-            raise RuntimeError(
+            raise SearchProviderError(
                 "Limite de utilização do Tavily atingido."
             )
 
         if response.status_code >= 500:
-            raise RuntimeError(
+            raise SearchProviderError(
                 "O serviço Tavily está temporariamente indisponível."
             )
 
         if response.status_code >= 400:
-            raise RuntimeError(
+            raise SearchProviderError(
                 f"O Tavily retornou erro HTTP {response.status_code}."
             )
 
         try:
             data = response.json()
         except ValueError as exc:
-            raise RuntimeError(
+            raise SearchProviderError(
                 "O Tavily retornou uma resposta JSON inválida."
             ) from exc
 
         if not isinstance(data, dict):
-            raise RuntimeError(
+            raise SearchProviderError(
                 "Formato de resposta inválido do Tavily."
             )
 
         raw_results = data.get("results")
 
         if not isinstance(raw_results, list):
-            raise RuntimeError(
+            raise SearchProviderError(
                 "A resposta do Tavily não contém uma lista de resultados."
             )
 
@@ -348,6 +400,8 @@ class SearchEngine:
 
         results = []
         seen_urls = set()
+        successful_providers = 0
+        provider_errors = []
 
         for provider in self.providers:
             remaining = limit - len(results)
@@ -355,10 +409,16 @@ class SearchEngine:
             if remaining <= 0:
                 break
 
-            provider_results = provider.search(
-                query,
-                limit=min(remaining, TAVILY_MAX_RESULTS),
-            )
+            try:
+                provider_results = provider.search(
+                    query,
+                    limit=min(remaining, TAVILY_MAX_RESULTS),
+                )
+            except SearchProviderError as exc:
+                provider_errors.append(exc)
+                continue
+
+            successful_providers += 1
 
             for result in provider_results:
                 if not isinstance(result, SearchResult):
@@ -383,6 +443,11 @@ class SearchEngine:
 
                 if len(results) >= limit:
                     break
+
+        if successful_providers == 0 and provider_errors:
+            raise SearchProviderError(
+                "Todos os provedores de pesquisa falharam."
+            ) from provider_errors[-1]
 
         return results
 
