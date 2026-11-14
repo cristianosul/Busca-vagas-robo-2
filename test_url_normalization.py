@@ -75,3 +75,44 @@ def test_equivalent_urls_are_detected_as_duplicates(isolated_db):
     assert first["status"] == "review"
     assert second["status"] == "duplicate"
     assert second["id"] == first["id"]
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://user:password@example.com/jobs/123",
+        "https://user@example.com/jobs/123",
+    ],
+)
+def test_rejects_urls_with_credentials(url):
+    with pytest.raises(ValueError, match="credenciais"):
+        repository.normalize_job_url(url)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com:invalid/jobs/123",
+        "https://[invalid-ipv6/jobs/123",
+        "https://example.com:0/jobs/123",
+    ],
+)
+def test_rejects_malformed_urls_and_invalid_ports(url):
+    with pytest.raises(ValueError):
+        repository.normalize_job_url(url)
+
+
+def test_removes_default_https_port():
+    normalized = repository.normalize_job_url(
+        "https://example.com:443/jobs/123"
+    )
+
+    assert normalized == "https://example.com/jobs/123"
+
+
+def test_preserves_non_default_port():
+    normalized = repository.normalize_job_url(
+        "https://example.com:8443/jobs/123"
+    )
+
+    assert normalized == "https://example.com:8443/jobs/123"
+    
