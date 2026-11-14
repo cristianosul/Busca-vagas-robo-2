@@ -319,24 +319,24 @@ def change_source_status(
 ):
     require_source_admin(x_admin_token)
 
-    if update.enabled:
-        source = get_source_record(source_id)
+    try:
+        if update.enabled:
+            source = get_source_record(source_id)
 
-        if not source:
+            if not source:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Fonte não encontrada.",
+                )
+
             raise HTTPException(
-                status_code=404,
-                detail="Fonte não encontrada.",
+                status_code=403,
+                detail=(
+                    "A ativação direta de fontes está bloqueada. "
+                    "É necessária uma verificação interna antes da ativação."
+                ),
             )
 
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                "A ativação direta de fontes está bloqueada. "
-                "É necessária uma verificação interna antes da ativação."
-            ),
-        )
-
-    try:
         source = update_source_status(
             source_id,
             update.enabled,
