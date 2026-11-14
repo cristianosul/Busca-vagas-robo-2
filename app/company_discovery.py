@@ -1,6 +1,13 @@
+
 from dataclasses import dataclass
 from html.parser import HTMLParser
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import (
+    parse_qsl,
+    urlencode,
+    urljoin,
+    urlsplit,
+    urlunsplit,
+)
 from contextlib import closing
 import ipaddress
 import time
@@ -15,6 +22,21 @@ REQUEST_TIMEOUT = 15.0
 MAX_DISCOVERY_SECONDS = 30.0
 MAX_HTML_BYTES = 1_000_000
 MAX_REDIRECTS = 5
+MAX_URL_LENGTH = 2048
+MAX_COMPANY_NAME_LENGTH = 150
+MAX_LINKS = 500
+
+TRACKING_PARAMETERS = {
+    "gclid",
+    "fbclid",
+    "dclid",
+    "msclkid",
+    "igshid",
+    "mc_cid",
+    "mc_eid",
+    "ref_src",
+    "ref_url",
+}
 
 CAREER_TERMS = (
     "carreira",
@@ -52,34 +74,112 @@ class CareerPageCandidate:
 
 
 class _LinkParser(HTMLParser):
+    """Extrai links HTML, inclusive quando possuem elementos aninhados."""
+
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.links = []
-        self.current_href = None
-        self.current_text = []
+        self.anchor_stack = []
+
+    def _save_link(self, anchor):
+        if len(self.links) >= MAX_LINKS:
+            return
+
+        href = anchor["href"]
+
+        if href is None:
+            return
+
+        text = " ".join(" ".join(anchor["text"]).split())
+
+        self.links.append((href, text))
 
     def handle_starttag(self, tag, attrs):
         if tag.lower() == "a":
             attributes = dict(attrs)
-            self.current_href = attributes.get("href")
-            self.current_text = []
+
+            self.anchor_stack.append({
+                "href": attributes.get("href"),
+                "text": [],
+            })
 
     def handle_data(self, data):
-        if self.current_href is not None:
-            self.current_text.append(data)
+        for anchor in self.anchor_stack:
+            anchor["text"].append(data)
 
     def handle_endtag(self, tag):
-        if tag.lower() == "a" and self.current_href is not None:
-            text = " ".join(" ".join(self.current_text).split())
+        if tag.lower() == "a" and self.anchor_stack:
+            anchor = self.anchor_stack.pop()
+            self._save_link(anchor)
 
-            self.links.append((self.current_href, text))
+    def close(self):
+        super().close()
 
-            self.current_href = None
-            self.current_text = []
+        # Também aproveita links cujo fechamento não veio no HTML.
+        while self.anchor_stack:
+            anchor = self.anchor_stack.pop()
+            self._save_link(anchor)
+
+
+def _canonical_hostname(host: str) -> str:
+    """Normaliza e valida um hostname, incluindo domínios internacionais."""
+
+    host = host.lower().rstrip(".")
+
+    if not host:
+        raise ValueError("Endereço do site inválido.")
+
+    try:
+        ip = ipaddress.ip_address(host)
+        return ip.compressed
+    except ValueError:
+        pass
+
+    try:
+        ascii_host = host.encode("idna").decode("ascii")
+    except UnicodeError as exc:
+        raise ValueError("Nome de domínio inválido.") from exc
+
+    if len(ascii_host) > 253:
+        raise ValueError("Nome de domínio muito longo.")
+
+    labels = ascii_host.split(".")
+
+    for label in labels:
+        if (
+            not label
+            or len(label) > 63
+            or not label[0].isalnum()
+            or not label[-1].isalnum()
+            or any(
+                not (character.isalnum() or character == "-")
+                for character in label
+            )
+        ):
+            raise ValueError("Nome de domínio inválido.")
+
+    return ascii_host
 
 
 def _validate_public_https_url(url: str):
-    parsed = urlsplit(url.strip())
+    """Valida HTTPS, hostname, porta e ausência de credenciais."""
+
+    if not isinstance(url, str):
+        raise ValueError("O endereço do site precisa ser um texto.")
+
+    if len(url) > MAX_URL_LENGTH:
+        raise ValueError("Endereço do site muito longo.")
+
+    if any(
+        character.isspace() or ord(character) < 32
+        for character in url
+    ):
+        raise ValueError("Endereço do site inválido.")
+
+    try:
+        parsed = urlsplit(url)
+    except ValueError as exc:
+        raise ValueError("Endereço do site inválido.") from exc
 
     if parsed.scheme.lower() != "https":
         raise ValueError("O site precisa utilizar HTTPS.")
@@ -92,13 +192,13 @@ def _validate_public_https_url(url: str):
 
     try:
         port = parsed.port
-    except ValueError:
-        raise ValueError("Porta do endereço inválida.")
+    except ValueError as exc:
+        raise ValueError("Porta do endereço inválida.") from exc
 
     if port not in (None, 443):
         raise ValueError("Somente a porta HTTPS padrão é permitida.")
 
-    host = parsed.hostname.lower().rstrip(".")
+    host = _canonical_hostname(parsed.hostname)
 
     if host == "localhost" or host.endswith(".localhost"):
         raise ValueError("Endereço local não permitido.")
@@ -119,6 +219,8 @@ def _validate_public_dns(
     deadline: float,
 ) -> list[str]:
     """Resolve A e AAAA com timeout e retorna somente IPs públicos."""
+
+    host = _canonical_hostname(host)
 
     try:
         ip = ipaddress.ip_address(host)
@@ -206,8 +308,8 @@ def _validate_public_dns(
         validated.append(resolved_ip.compressed)
 
     return sorted(validated)
-            
-    
+
+
 def _url_with_pinned_ip(url: str, ip: str) -> str:
     """Monta a URL com o IP validado, preservando caminho e consulta."""
 
@@ -232,6 +334,12 @@ def _same_company_domain(
     candidate_host: str,
     official_host: str,
 ) -> bool:
+    try:
+        official_host = _canonical_hostname(official_host)
+        candidate_host = _canonical_hostname(candidate_host)
+    except ValueError:
+        return False
+
     try:
         official_ip = ipaddress.ip_address(official_host)
     except ValueError:
@@ -261,6 +369,12 @@ def _allowed_redirect_host(
     """Permite apenas o domínio oficial e sua versão com www."""
 
     try:
+        official_host = _canonical_hostname(official_host)
+        candidate_host = _canonical_hostname(candidate_host)
+    except ValueError:
+        return False
+
+    try:
         official_ip = ipaddress.ip_address(official_host)
     except ValueError:
         official_ip = None
@@ -279,17 +393,57 @@ def _allowed_redirect_host(
         base_host,
         f"www.{base_host}",
     }
-    
 
 
 def _normalize_page_url(url: str) -> str:
+    """Normaliza a URL e remove fragmentos e parâmetros de rastreamento."""
+
     parsed = urlsplit(url)
+    host = _canonical_hostname(parsed.hostname)
+
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("Porta do endereço inválida.") from exc
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+
+    if ip is not None and ip.version == 6:
+        netloc = f"[{host}]"
+    else:
+        netloc = host
+
+    if port not in (None, 443):
+        netloc = f"{netloc}:{port}"
+
+    query_items = parse_qsl(
+        parsed.query,
+        keep_blank_values=True,
+    )
+
+    filtered_query = []
+
+    for key, value in query_items:
+        lowered_key = key.lower()
+
+        if lowered_key.startswith("utm_"):
+            continue
+
+        if lowered_key in TRACKING_PARAMETERS:
+            continue
+
+        filtered_query.append((key, value))
+
+    normalized_query = urlencode(sorted(filtered_query))
 
     return urlunsplit((
         "https",
-        parsed.netloc.lower(),
+        netloc,
         parsed.path or "/",
-        parsed.query,
+        normalized_query,
         "",
     ))
 
@@ -369,7 +523,7 @@ def _fetch_checked_html(
         _remaining_time(deadline)
 
         parsed = _validate_public_https_url(current_url)
-        host = parsed.hostname.lower().rstrip(".")
+        host = _canonical_hostname(parsed.hostname)
 
         if not _allowed_redirect_host(host, official_host):
             raise ValueError(
@@ -405,8 +559,8 @@ def _fetch_checked_html(
 
                 next_parsed = _validate_public_https_url(next_url)
 
-                next_host = (
-                    next_parsed.hostname.lower().rstrip(".")
+                next_host = _canonical_hostname(
+                    next_parsed.hostname
                 )
 
                 if not _allowed_redirect_host(
@@ -462,8 +616,8 @@ def _fetch_checked_html(
     raise ValueError(
         "Não foi possível acessar a página com segurança."
     )
-    
-    
+
+
 def discover_career_pages(
     company_name: str,
     official_site_url: str,
@@ -483,16 +637,21 @@ def discover_career_pages(
     if len(company_name) < 2:
         raise ValueError("Informe um nome de empresa válido.")
 
+    if len(company_name) > MAX_COMPANY_NAME_LENGTH:
+        raise ValueError("Nome da empresa muito longo.")
+
     deadline = time.monotonic() + MAX_DISCOVERY_SECONDS
 
     _remaining_time(deadline)
 
     if not isinstance(official_site_url, str):
-        raise ValueError("O endereço do site oficial precisa ser um texto.")
+        raise ValueError(
+            "O endereço do site oficial precisa ser um texto."
+        )
 
     official = _validate_public_https_url(official_site_url)
 
-    official_host = official.hostname.lower().rstrip(".")
+    official_host = _canonical_hostname(official.hostname)
 
     headers = {
         "User-Agent": USER_AGENT,
@@ -518,6 +677,7 @@ def discover_career_pages(
 
     parser = _LinkParser()
     parser.feed(html)
+    parser.close()
 
     candidates = []
     seen_urls = set()
@@ -535,7 +695,7 @@ def discover_career_pages(
         except ValueError:
             continue
 
-        host = parsed.hostname.lower().rstrip(".")
+        host = _canonical_hostname(parsed.hostname)
 
         if not _same_company_domain(host, official_host):
             continue
@@ -561,4 +721,3 @@ def discover_career_pages(
     _remaining_time(deadline)
 
     return candidates
-    
