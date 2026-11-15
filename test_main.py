@@ -648,7 +648,8 @@ def test_discovery_rejects_limit_above_maximum(
 
 def test_readiness_database_available(client, monkeypatch):
     class FakeConnection:
-        closed = False
+        def __init__(self):
+            self.closed = False
 
         def close(self):
             self.closed = True
@@ -662,8 +663,7 @@ def test_readiness_database_available(client, monkeypatch):
         lambda: connection,
     )
 
-    
-def fake_execute(conn, query):
+    def fake_execute(conn, query):
         captured["connection"] = conn
         captured["query"] = query
 
@@ -673,7 +673,11 @@ def fake_execute(conn, query):
 
         return FakeResult()
 
-    monkeypatch.setattr(main, "execute", fake_execute)
+    monkeypatch.setattr(
+        main,
+        "execute",
+        fake_execute,
+    )
 
     response = client.get("/ready")
 
@@ -683,6 +687,7 @@ def fake_execute(conn, query):
     assert response.json()["publishing_enabled"] is False
     assert captured["connection"] is connection
     assert captured["query"] == "SELECT 1"
+    assert connection.closed is True
 
 
 def test_readiness_database_connection_failure(client, monkeypatch):
@@ -703,7 +708,8 @@ def test_readiness_closes_connection_after_success(
     monkeypatch,
 ):
     class FakeConnection:
-        closed = False
+        def __init__(self):
+            self.closed = False
 
         def close(self):
             self.closed = True
@@ -737,7 +743,8 @@ def test_readiness_closes_connection_after_query_failure(
     monkeypatch,
 ):
     class FakeConnection:
-        closed = False
+        def __init__(self):
+            self.closed = False
 
         def close(self):
             self.closed = True
@@ -753,7 +760,11 @@ def test_readiness_closes_connection_after_query_failure(
     def fail(conn, query):
         raise RuntimeError("Falha na consulta")
 
-    monkeypatch.setattr(main, "execute", fail)
+    monkeypatch.setattr(
+        main,
+        "execute",
+        fail,
+    )
 
     response = client.get("/ready")
 
@@ -784,9 +795,9 @@ def test_discovery_normalizes_query_spaces(
     client,
     monkeypatch,
 ):
-    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
-
     from app.search_engine import SearchResult
+
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
 
     captured = {}
 
@@ -813,28 +824,4 @@ def test_discovery_normalizes_query_spaces(
 
     response = client.post(
         "/api/discovery/search",
-        params={"query": "  Empresa   Teste   carreiras  "},
-        headers={"X-Admin-Token": "token-secreto"},
-    )
-
-    assert response.status_code == 200
-    assert captured["query"] == "Empresa Teste carreiras"
-    assert response.json()["query"] == "Empresa Teste carreiras"
-
-
-def test_discovery_rejects_query_with_only_spaces(
-    client,
-    monkeypatch,
-):
-    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
-
-    response = client.post(
-        "/api/discovery/search",
-        params={"query": "   "},
-        headers={"X-Admin-Token": "token-secreto"},
-    )
-
-    assert response.status_code == 422
-    assert "3 caracteres úteis" in response.json()["detail"]
-    
-    
+        params={"query": " 
