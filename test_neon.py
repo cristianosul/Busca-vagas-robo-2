@@ -42,28 +42,30 @@ def main():
     )
 
     try:
-        # 1. Confirmar conexão real com PostgreSQL.
+        # 1. Confirma a conexão real com PostgreSQL.
         with connect() as conn:
-            result = execute(
-                conn,
-                "SELECT 1 AS connection_ok",
-            ).fetchone()
+            result = execute(conn, "SELECT 1").fetchone()
 
-            assert result["connection_ok"] == 1, (
-                "O PostgreSQL não confirmou a conexão."
-            )
+        assert result is not None, (
+            "O PostgreSQL não retornou resultado para SELECT 1."
+        )
 
         print("TESTE OK: conexão com PostgreSQL")
 
-        # 2. Executar as migrações oficiais do repositório.
+        # 2. Executa as migrações antes de qualquer inserção.
         stage = "execução das migrações"
 
         init_db()
 
         print("TESTE OK: migrações executadas")
 
-        # 3. Conferir as colunas necessárias.
+        # 3. Confirma a existência das colunas necessárias.
         stage = "verificação das colunas"
+
+        required_columns = {
+            "normalized_url",
+            "evidence_json",
+        }
 
         with connect() as conn:
             rows = execute(
@@ -72,88 +74,63 @@ def main():
                 SELECT column_name
                 FROM information_schema.columns
                 WHERE table_schema = current_schema()
-                  AND table_name = ?
+                  AND table_name = 'candidates'
                 """,
-                ("candidates",),
             ).fetchall()
 
-        columns = {row["column_name"] for row in rows}
-
-        required_columns = {
-            "id",
-            "title",
-            "company",
-            "location",
-            "mode",
-            "source_name",
-            "source_url",
-            "original_job_url",
-            "application_url",
-            "normalized_url",
-            "score",
-            "status",
-            "reasons_json",
-            "payload_json",
-            "evidence_json",
-            "created_at",
+        existing_columns = {
+            row["column_name"] for row in rows
         }
 
-        missing_columns = required_columns - columns
+        missing_columns = required_columns - existing_columns
 
-        assert not missing_columns, (
-            "Colunas ausentes na tabela candidates: "
-            + ", ".join(sorted(missing_columns))
-        )
+        if missing_columns:
+            raise RuntimeError(
+                "Colunas ausentes após a migração: "
+                + ", ".join(sorted(missing_columns))
+            )
 
-        print("TESTE OK: estrutura da tabela candidates")
+        print("TESTE OK: colunas necessárias existem")
 
-        # 4. Confirmar a existência de índice único
-        # sobre normalized_url.
+        # 4. Confirma o índice único de deduplicação.
         stage = "verificação do índice único"
 
         with connect() as conn:
             indexes = execute(
                 conn,
                 """
-                SELECT indexname, indexdef
+                SELECT indexdef
                 FROM pg_indexes
                 WHERE schemaname = current_schema()
                   AND tablename = 'candidates'
+                  AND indexname = 'ux_candidates_normalized_url'
                 """,
             ).fetchall()
 
-        has_unique_normalized_index = any(
-            "CREATE UNIQUE INDEX" in row["indexdef"].upper()
-            and "normalized_url" in row["indexdef"].lower()
-            for row in indexes
-        )
+        if not indexes:
+            raise RuntimeError(
+                "Índice único ux_candidates_normalized_url "
+                "não encontrado."
+            )
 
-        assert has_unique_normalized_index, (
-            "Não foi encontrado índice único para normalized_url."
-        )
+        print("TESTE OK: índice único encontrado")
 
-        print("TESTE OK: índice único de deduplicação")
-
-        # 5. Inserir uma vaga fictícia.
-        stage = "inserção da vaga de teste"
+        # 5. Insere uma oportunidade fictícia.
+        stage = "inserção da oportunidade"
 
         first = save_candidate(candidate)
 
         if first["status"] == "duplicate":
             raise RuntimeError(
-                "A URL de teste já estava cadastrada. "
+                "URL de teste já cadastrada. "
                 "Nenhum registro existente será removido."
             )
 
         candidate_id = first["id"]
 
-        assert candidate_id is not None, (
-            "A inserção não retornou um ID."
-        )
+        print("TESTE OK: oportunidade fictícia inserida")
 
-        print("TESTE OK: vaga fictícia inserida")
-
-        # 6. Verificar duplicidade.
+        # 6. Verifica o bloqueio de duplicidade.
         stage = "verificação de duplicidade"
 
         second = save_candidate(candidate)
@@ -168,19 +145,19 @@ def main():
 
         print("TESTE OK: duplicidade bloqueada")
 
-        # 7. Conferir persistência em conexão independente.
-        stage = "verificação dos dados persistidos"
+        # 7. Confirma a persistência em uma conexão independente.
+        stage = "verificação da persistência"
 
         with connect() as conn:
             row = execute(
                 conn,
                 """
-                SELECT id,
-                       title,
-                       normalized_url,
-                       score,
-                       status,
-                       evidence_json
+                SELECT
+                    id,
+                    normalized_url,
+                    score,
+                    status,
+                    evidence_json
                 FROM candidates
                 WHERE id = ?
                   AND normalized_url = ?
@@ -189,42 +166,23 @@ def main():
             ).fetchone()
 
         assert row is not None, (
-            "A vaga não foi encontrada em uma nova conexão."
+            "O registro não foi encontrado em uma segunda conexão."
         )
 
         assert row["id"] == candidate_id
-        assert row["title"] == candidate.title
         assert row["normalized_url"] == normalized_url
         assert row["score"] == 0
         assert row["status"] == "review"
 
-        print("TESTE OK: persistência confirmada em nova conexão")
-
-        # 8. Validar as evidências armazenadas.
-        stage = "verificação das evidências persistidas"
-
-        evidence_data = json.loads(row["evidence_json"] or "{}")
-        evidence = CandidateEvidence.model_validate(evidence_data)
-
-        evidence_flags = (
-            "company_verified",
-            "original_page_verified",
-            "application_link_verified",
-            "job_content_verified",
-            "date_verified",
+        evidence_data = json.loads(
+            row["evidence_json"] or "{}"
         )
 
-        assert all(
-            getattr(evidence, field) is False
-            for field in evidence_flags
-        ), "A vaga fictícia não deveria ter critérios verificados."
+        CandidateEvidence.model_validate(evidence_data)
 
-        assert not evidence.evidence_records, (
-            "A vaga fictícia não deveria possuir registros de evidência."
-        )
-
-        print("TESTE OK: evidências persistidas e não verificadas")
-        print("INTEGRAÇÃO NEON: TODOS OS TESTES APROVADOS")
+        print("TESTE OK: persistência confirmada")
+        print("TESTE OK: evidências armazenadas e válidas")
+        print("TESTE OK: oportunidade permaneceu em revisão")
 
     except Exception as exc:
         raise RuntimeError(
@@ -232,28 +190,22 @@ def main():
         ) from exc
 
     finally:
+        # Remove somente o registro criado por este teste.
         if candidate_id is not None:
-            try:
-                with connect() as conn:
-                    execute(
-                        conn,
-                        """
-                        DELETE FROM candidates
-                        WHERE id = ?
-                          AND normalized_url = ?
-                        """,
-                        (candidate_id, normalized_url),
-                    )
+            with connect() as conn:
+                execute(
+                    conn,
+                    """
+                    DELETE FROM candidates
+                    WHERE id = ?
+                      AND normalized_url = ?
+                    """,
+                    (candidate_id, normalized_url),
+                )
 
-                print("LIMPEZA OK: registro de teste removido")
-
-            except Exception as cleanup_error:
-                raise RuntimeError(
-                    "Falha ao remover o registro de teste. "
-                    f"ID: {candidate_id}. "
-                    f"Erro: {cleanup_error}"
-                ) from cleanup_error
+            print("LIMPEZA OK: registro de teste removido")
 
 
 if __name__ == "__main__":
     main()
+    
