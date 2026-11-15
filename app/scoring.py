@@ -1,3 +1,4 @@
+
 from app.models import CandidateEvidence
 
 
@@ -31,10 +32,20 @@ def score_candidate(evidence: CandidateEvidence) -> tuple[int, str, list[str]]:
             reasons.append(f"{labels[field]} ainda não verificada")
 
     if evidence.rejected_reason:
-        return score, "rejected", reasons + [f"Rejeitada: {evidence.rejected_reason}"]
+        return score, "rejected", reasons + [
+            f"Rejeitada: {evidence.rejected_reason}"
+        ]
 
-    mandatory_ok = all(getattr(evidence, field) for field in WEIGHTS)
-    if mandatory_ok and score >= 85:
-        return score, "approved", reasons + ["Aprovada: todas as verificações obrigatórias foram concluídas"]
+    mandatory_ok = all(
+        getattr(evidence, field)
+        for field in WEIGHTS
+    )
 
-    return score, "review", reasons + ["Em revisão: faltam evidências obrigatórias; não publicar"]
+    if mandatory_ok:
+        return score, "approved", reasons + [
+            "Aprovada: todas as verificações obrigatórias foram concluídas"
+        ]
+
+    return score, "review", reasons + [
+        "Em revisão: faltam evidências obrigatórias; não publicar"
+    ]
