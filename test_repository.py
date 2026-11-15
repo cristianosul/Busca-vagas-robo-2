@@ -474,4 +474,150 @@ def test_init_db_stops_on_duplicate_normalized_urls(
         ).fetchone()[0]
 
     assert total == 2
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/job with spaces",
+        "https://example.com/jobs/\n123",
+        "https://example.com\\jobs\\123",
+        "https://-example.com/jobs/123",
+        "https://example..com/jobs/123",
+        "https://example.com:99999/jobs/123",
+        "https://user:password@example.com/jobs/123",
+    ],
+)
+def test_normalize_job_url_rejects_invalid_values(url):
+    with pytest.raises(ValueError):
+        repository.normalize_job_url(url)
+
+
+def test_normalize_job_url_accepts_outer_whitespace():
+    result = repository.normalize_job_url(
+        "  https://example.com/jobs/123  "
+    )
+
+    assert result == "https://example.com/jobs/123"
+
+
+def test_normalize_job_url_converts_international_domain():
+    result = repository.normalize_job_url(
+        "https://exämple.com/jobs/123"
+    )
+
+    assert result == "https://xn--exmple-cua.com/jobs/123"
+
+
+def test_normalize_job_url_removes_default_port_and_fragment():
+    result = repository.normalize_job_url(
+        "https://example.com:443/jobs/123#details"
+    )
+
+    assert result == "https://example.com/jobs/123"
+
+
+def test_normalize_job_url_sorts_meaningful_parameters():
+    result = repository.normalize_job_url(
+        "https://example.com/jobs/123?z=2&a=1"
+    )
+
+    assert result == "https://example.com/jobs/123?a=1&z=2"
+
+
+def test_normalize_job_url_rejects_control_character():
+    with pytest.raises(ValueError):
+        repository.normalize_job_url(
+            "https://example.com/jobs/\x00"
+        )
+
+
+def test_init_db_reports_invalid_legacy_url_and_preserves_candidate(
+    tmp_path,
+    monkeypatch,
+):
+    import sqlite3
+
+    db_path = tmp_path / "invalid_legacy.db"
+
+    monkeypatch.setattr(repository, "DATABASE_URL", "")
+    monkeypatch.setattr(repository, "DB_PATH", db_path)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("""
+            CREATE TABLE candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                company TEXT NOT NULL,
+                location TEXT,
+                mode TEXT NOT NULL,
+                source_name TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                original_job_url TEXT NOT NULL,
+                application_url TEXT,
+                score INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                reasons_json TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+
+        conn.execute("""
+            CREATE TABLE sources (
+                source_id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                source_type TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                "authorization" TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 0,
+                notes TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+
+        conn.execute("""
+            INSERT INTO candidates (
+                id, title, company, location, mode, source_name,
+                source_url, original_job_url, application_url,
+                score, status, reasons_json, payload_json, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            77,
+            "Vaga antiga",
+            "Empresa antiga",
+            "Brasil",
+            "Não informado",
+            "Fonte antiga",
+            "https://example.com/careers",
+            "endereco-invalido",
+            None,
+            0,
+            "review",
+            "[]",
+            "{}",
+            "2026-01-01T00:00:00+00:00",
+        ))
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"oportunidade ID 77",
+    ):
+        repository.init_db()
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute("""
+            SELECT id, original_job_url
+            FROM candidates
+            WHERE id = 77
+        """).fetchone()
+
+        total = conn.execute(
+            "SELECT COUNT(*) FROM candidates"
+        ).fetchone()[0]
+
+    assert total == 1
+    assert row == (77, "endereco-invalido")
     
