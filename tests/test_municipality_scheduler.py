@@ -262,7 +262,10 @@ def test_recover_interrupted_municipality_preserves_attempts(
 
     first_claim = scheduler_db.claim_next_municipality(0)
 
-    recovered = scheduler_db.recover_interrupted_municipalities(0)
+    recovered = scheduler_db.recover_interrupted_municipalities(
+        0,
+        stale_after_seconds=0,
+    )
 
     assert recovered == 1
 
@@ -326,13 +329,15 @@ def test_recover_all_batches_when_batch_index_is_none(scheduler_db):
     scheduler_db.claim_next_municipality(0)
     scheduler_db.claim_next_municipality(1)
 
-    recovered = scheduler_db.recover_interrupted_municipalities()
+    recovered = scheduler_db.recover_interrupted_municipalities(
+        stale_after_seconds=0,
+    )
 
     assert recovered == 2
 
     assert scheduler_db.get_batch_progress(0)["pending"] == 1
     assert scheduler_db.get_batch_progress(1)["pending"] == 1
-
+    
 
 def test_list_batch_municipalities_filters_by_status(scheduler_db):
     scheduler_db.register_municipality_batch(
@@ -416,3 +421,88 @@ def test_progress_for_unknown_batch_is_zero(scheduler_db):
         "completed": 0,
         "failed": 0,
     }
+
+
+def test_current_batch_does_not_move_backwards(scheduler_db):
+    scheduler_db.register_municipality_batch(
+        2,
+        [municipality("4305108", "Caxias do Sul")],
+    )
+
+    scheduler_db.register_municipality_batch(
+        1,
+        [municipality("4314902", "Porto Alegre")],
+    )
+
+    assert scheduler_db.get_current_batch() == 2
+
+
+def test_duplicate_batch_does_not_change_current_batch(scheduler_db):
+    scheduler_db.register_municipality_batch(
+        2,
+        [municipality("4305108", "Caxias do Sul")],
+    )
+
+    scheduler_db.register_municipality_batch(
+        1,
+        [municipality("4305108", "Nome diferente")],
+    )
+
+    assert scheduler_db.get_current_batch() == 2
+
+
+def test_recent_running_municipality_is_not_recovered(scheduler_db):
+    scheduler_db.register_municipality_batch(
+        0,
+        [municipality("4305108", "Caxias do Sul")],
+    )
+
+    scheduler_db.claim_next_municipality(0)
+
+    recovered = scheduler_db.recover_interrupted_municipalities(
+        0,
+        stale_after_seconds=3600,
+    )
+
+    assert recovered == 0
+    assert scheduler_db.get_batch_progress(0)["running"] == 1
+
+
+def test_old_running_municipality_is_recovered(scheduler_db):
+    scheduler_db.register_municipality_batch(
+        0,
+        [municipality("4305108", "Caxias do Sul")],
+    )
+
+    scheduler_db.claim_next_municipality(0)
+
+    with scheduler_db.db_session(immediate=True) as conn:
+        conn.execute(
+            """
+            UPDATE municipality_discovery
+            SET started_at = '2000-01-01T00:00:00+00:00'
+            WHERE municipality_code = '4305108'
+            """
+        )
+
+    recovered = scheduler_db.recover_interrupted_municipalities(
+        0,
+        stale_after_seconds=3600,
+    )
+
+    assert recovered == 1
+    assert scheduler_db.get_batch_progress(0)["pending"] == 1
+
+
+@pytest.mark.parametrize(
+    "stale_after_seconds",
+    [-1, True, False, 1.5, "3600", None],
+)
+def test_recovery_rejects_invalid_stale_timeout(
+    scheduler_db,
+    stale_after_seconds,
+):
+    with pytest.raises(ValueError, match="prazo"):
+        scheduler_db.recover_interrupted_municipalities(
+            stale_after_seconds=stale_after_seconds,
+        )
