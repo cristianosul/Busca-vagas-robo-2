@@ -24,12 +24,25 @@ def utc_now() -> str:
 
 
 def normalize_job_url(value: str) -> str:
-    """Remove rastreamento e normaliza URLs, rejeitando formatos inválidos."""
+    """Valida e normaliza URLs, removendo parâmetros de rastreamento."""
     if not isinstance(value, str) or not value.strip():
         raise ValueError("URL original inválida.")
 
+    value = value.strip()
+
+    if any(
+        char.isspace() or ord(char) < 32 or ord(char) == 127
+        for char in value
+    ):
+        raise ValueError(
+            "URL original contém espaços ou caracteres de controle."
+        )
+
+    if "\\" in value:
+        raise ValueError("URL original contém barras inválidas.")
+
     try:
-        parts = urlsplit(value.strip())
+        parts = urlsplit(value)
 
         scheme = parts.scheme.lower()
         hostname = (parts.hostname or "").lower()
@@ -48,7 +61,37 @@ def normalize_job_url(value: str) -> str:
         raise ValueError("Porta inválida na URL original.")
 
     if ":" in hostname:
+        # Endereços IPv6 precisam estar entre colchetes na URL.
+        if not parts.netloc.startswith("["):
+            raise ValueError("Endereço IPv6 inválido na URL original.")
+
         hostname = f"[{hostname}]"
+
+    else:
+        try:
+            hostname = hostname.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise ValueError(
+                "Hostname inválido na URL original."
+            ) from exc
+
+        if len(hostname) > 253:
+            raise ValueError("Hostname excede o tamanho permitido.")
+
+        labels = hostname.rstrip(".").split(".")
+
+        if not labels or any(
+            not label
+            or len(label) > 63
+            or label.startswith("-")
+            or label.endswith("-")
+            or not all(
+                char.isalnum() or char == "-"
+                for char in label
+            )
+            for label in labels
+        ):
+            raise ValueError("Hostname inválido na URL original.")
 
     if port is not None and not (
         (scheme == "https" and port == 443)
@@ -65,7 +108,10 @@ def normalize_job_url(value: str) -> str:
 
     query_items = []
 
-    for key, val in parse_qsl(parts.query, keep_blank_values=True):
+    for key, val in parse_qsl(
+        parts.query,
+        keep_blank_values=True,
+    ):
         lowered = key.lower()
 
         if lowered.startswith("utm_") or lowered in TRACKING_KEYS:
@@ -75,7 +121,13 @@ def normalize_job_url(value: str) -> str:
 
     query = urlencode(sorted(query_items))
 
-    return urlunsplit((scheme, netloc, path, query, ""))
+    return urlunsplit((
+        scheme,
+        netloc,
+        path,
+        query,
+        "",
+    ))
     
 
 def connect():
