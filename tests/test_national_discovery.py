@@ -424,4 +424,271 @@ def test_national_report_preserves_results_compatibility(
     assert isinstance(report.results, tuple)
     assert isinstance(report.matches, tuple)
     assert report.matches[0].result is result
+
+
+def make_ibge_municipality(code, name, state):
+    return {
+        "id": code,
+        "nome": name,
+        "regiao-imediata": {
+            "regiao-intermediaria": {
+                "UF": {
+                    "sigla": state,
+                }
+            }
+        },
+    }
+
+
+def mock_ibge_response(monkeypatch, municipalities):
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return municipalities
+
+    monkeypatch.setattr(
+        national_discovery.httpx,
+        "get",
+        lambda *args, **kwargs: FakeResponse(),
+    )
+
+
+def test_load_brazilian_municipalities(monkeypatch):
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+    payload = [
+        make_ibge_municipality(4300034, "Aceguá", "RS"),
+        make_ibge_municipality(4300059, "Água Santa", "RS"),
+        make_ibge_municipality(3550308, "São Paulo", "SP"),
+    ]
+
+    mock_ibge_response(monkeypatch, payload)
+
+    municipalities = (
+        national_discovery.load_brazilian_municipalities()
+    )
+
+    assert len(municipalities) == 3
+    assert municipalities[0].code == "4300034"
+    assert municipalities[0].name == "Aceguá"
+    assert municipalities[0].state == "RS"
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+
+def test_load_municipalities_preserves_small_interior_cities(
+    monkeypatch,
+):
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+    payload = [
+        make_ibge_municipality(4300034, "Aceguá", "RS"),
+        make_ibge_municipality(4300059, "Água Santa", "RS"),
+        make_ibge_municipality(4300109, "Agudo", "RS"),
+    ]
+
+    mock_ibge_response(monkeypatch, payload)
+
+    queries = national_discovery.build_municipal_queries(0)
+
+    municipality_names = [
+        item[2]
+        for item in queries
+    ]
+
+    assert "Aceguá" in municipality_names
+    assert "Água Santa" in municipality_names
+    assert "Agudo" in municipality_names
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+    
+    
+def test_municipal_queries_are_divided_into_batches(monkeypatch):
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+    payload = [
+        make_ibge_municipality(
+            4300000 + index,
+            f"Municipio {index:03d}",
+            "RS",
+        )
+        for index in range(121)
+    ]
+
+    mock_ibge_response(monkeypatch, payload)
+
+    first_batch = national_discovery.build_municipal_queries(0)
+    second_batch = national_discovery.build_municipal_queries(1)
+    third_batch = national_discovery.build_municipal_queries(2)
+
+    assert len(first_batch) == 60
+    assert len(second_batch) == 60
+    assert len(third_batch) == 1
+
+    first_codes = {
+        item[2]
+        for item in first_batch
+    }
+
+    second_codes = {
+        item[2]
+        for item in second_batch
+    }
+
+    assert first_codes.isdisjoint(second_codes)
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+
+def test_municipality_batch_count(monkeypatch):
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+    payload = [
+        make_ibge_municipality(
+            4300000 + index,
+            f"Municipio {index:03d}",
+            "RS",
+        )
+        for index in range(121)
+    ]
+
+    mock_ibge_response(monkeypatch, payload)
+
+    assert national_discovery.municipality_batch_count() == 3
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+
+def test_municipal_queries_reject_invalid_batch(monkeypatch):
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+    payload = [
+        make_ibge_municipality(4300034, "Aceguá", "RS"),
+    ]
+
+    mock_ibge_response(monkeypatch, payload)
+
+    with pytest.raises(ValueError):
+        national_discovery.build_municipal_queries(-1)
+
+    with pytest.raises(ValueError):
+        national_discovery.build_municipal_queries(True)
+
+    with pytest.raises(ValueError):
+        national_discovery.build_municipal_queries(1)
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+
+def test_search_municipalities_records_city_and_state(
+    fake_engine_class,
+    monkeypatch,
+):
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+    payload = [
+        make_ibge_municipality(4300034, "Aceguá", "RS"),
+    ]
+
+    mock_ibge_response(monkeypatch, payload)
+
+    result = make_result(
+        "https://empresa.example/vagas"
+    )
+
+    engine = fake_engine_class({
+        "vagas de emprego empresas contratando agências de emprego "
+        "SINE Aceguá RS": [result],
+    })
+
+    coordinator = national_discovery.NationalDiscoveryCoordinator(
+        engine
+    )
+
+    report = coordinator.search_municipalities(batch_index=0)
+
+    assert len(report.matches) == 1
+
+    match = report.matches[0]
+
+    assert match.category == "municipality:RS"
+    assert match.municipality == "Aceguá"
+    assert match.state == "RS"
+    assert match.result == result
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+
+def test_ibge_invalid_response_raises_catalog_error(monkeypatch):
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            raise ValueError("JSON inválido")
+
+    monkeypatch.setattr(
+        national_discovery.httpx,
+        "get",
+        lambda *args, **kwargs: FakeResponse(),
+    )
+
+    with pytest.raises(
+        national_discovery.MunicipalityCatalogError
+    ):
+        national_discovery.load_brazilian_municipalities()
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+
+def test_ibge_empty_catalog_raises_error(monkeypatch):
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+    mock_ibge_response(monkeypatch, [])
+
+    with pytest.raises(
+        national_discovery.MunicipalityCatalogError
+    ):
+        national_discovery.load_brazilian_municipalities()
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+
+def test_ibge_cache_avoids_repeated_requests(monkeypatch):
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+    payload = [
+        make_ibge_municipality(4300034, "Aceguá", "RS"),
+    ]
+
+    calls = {"count": 0}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return payload
+
+    def fake_get(*args, **kwargs):
+        calls["count"] += 1
+        return FakeResponse()
+
+    monkeypatch.setattr(
+        national_discovery.httpx,
+        "get",
+        fake_get,
+    )
+
+    first = national_discovery.load_brazilian_municipalities()
+    second = national_discovery.load_brazilian_municipalities()
+
+    assert first == second
+    assert calls["count"] == 1
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
     
