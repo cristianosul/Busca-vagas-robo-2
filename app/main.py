@@ -26,6 +26,19 @@ from app.search_engine import (
     SearchEngine,
     TavilySearchProvider,
 )
+from app.municipality_scheduler import (
+    init_municipality_scheduler,
+    get_current_batch,
+    get_batch_progress,
+    list_batch_municipalities,
+    register_municipality_batch,
+)
+from app.national_discovery import (
+    MunicipalityCatalogError,
+    MAX_MUNICIPALITIES_PER_BATCH,
+    load_brazilian_municipalities,
+    municipality_batch_count,
+)
 
 
 logging.basicConfig(level=logging.INFO)
@@ -33,7 +46,7 @@ logger = logging.getLogger("busca-vagas-robo-2")
 
 
 def require_source_admin(token: str | None):
-    """Protege o gerenciamento de fontes, candidatos e pesquisas."""
+    """Protege o gerenciamento administrativo."""
 
     expected_token = os.getenv("SOURCE_ADMIN_TOKEN", "").strip()
 
@@ -57,8 +70,12 @@ async def lifespan(app: FastAPI):
     try:
         init_db()
         logger.info("Banco de dados inicializado com sucesso")
+
+        init_municipality_scheduler()
+        logger.info("Agendador municipal inicializado com sucesso")
+
     except Exception:
-        logger.exception("Falha ao inicializar o banco de dados")
+        logger.exception("Falha ao inicializar o banco de dados ou agendador")
         raise
 
     yield
@@ -269,6 +286,188 @@ def discover_web_results(
         raise HTTPException(
             status_code=500,
             detail="Não foi possível realizar a pesquisa.",
+        )
+
+
+@app.get("/admin/municipalities/batches/current")
+def current_municipality_batch(
+    x_admin_token: str | None = Header(
+        default=None,
+        alias="X-Admin-Token",
+    ),
+):
+    """Consulta o lote municipal atualmente registrado."""
+
+    require_source_admin(x_admin_token)
+
+    try:
+        return {
+            "current_batch": get_current_batch(),
+        }
+
+    except Exception:
+        logger.exception("Erro ao consultar lote municipal atual")
+
+        raise HTTPException(
+            status_code=500,
+            detail="Não foi possível consultar o lote atual.",
+        )
+
+
+@app.get("/admin/municipalities/batches/{batch_index}/progress")
+def municipality_batch_progress(
+    batch_index: int,
+    x_admin_token: str | None = Header(
+        default=None,
+        alias="X-Admin-Token",
+    ),
+):
+    """Consulta o progresso de um lote municipal."""
+
+    require_source_admin(x_admin_token)
+
+    try:
+        return get_batch_progress(batch_index)
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        ) from exc
+
+    except Exception:
+        logger.exception("Erro ao consultar progresso municipal")
+
+        raise HTTPException(
+            status_code=500,
+            detail="Não foi possível consultar o progresso do lote.",
+        )
+
+
+@app.get("/admin/municipalities/batches/{batch_index}")
+def get_municipality_batch(
+    batch_index: int,
+    status: str | None = Query(
+        default=None,
+        pattern="^(pending|running|completed|failed)$",
+    ),
+    x_admin_token: str | None = Header(
+        default=None,
+        alias="X-Admin-Token",
+    ),
+):
+    """Lista os municípios registrados em um lote."""
+
+    require_source_admin(x_admin_token)
+
+    try:
+        municipalities = list_batch_municipalities(
+            batch_index=batch_index,
+            status=status,
+        )
+
+        return {
+            "batch_index": batch_index,
+            "status_filter": status,
+            "total": len(municipalities),
+            "municipalities": municipalities,
+        }
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        ) from exc
+
+    except Exception:
+        logger.exception("Erro ao listar municípios do lote")
+
+        raise HTTPException(
+            status_code=500,
+            detail="Não foi possível listar os municípios.",
+        )
+
+
+@app.post("/admin/municipalities/batches/{batch_index}/register")
+def register_municipality_batch_endpoint(
+    batch_index: int,
+    x_admin_token: str | None = Header(
+        default=None,
+        alias="X-Admin-Token",
+    ),
+):
+    """Registra no banco os municípios do lote solicitado."""
+
+    require_source_admin(x_admin_token)
+
+    if (
+        isinstance(batch_index, bool)
+        or batch_index < 0
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="O índice do lote deve ser não negativo.",
+        )
+
+    try:
+        total_batches = municipality_batch_count()
+
+        if batch_index >= total_batches:
+            raise HTTPException(
+                status_code=404,
+                detail="Lote municipal fora do intervalo disponível.",
+            )
+
+        municipalities = load_brazilian_municipalities()
+
+        start = batch_index * MAX_MUNICIPALITIES_PER_BATCH
+        end = start + MAX_MUNICIPALITIES_PER_BATCH
+
+        selected_batch = municipalities[start:end]
+
+        if not selected_batch:
+            raise HTTPException(
+                status_code=404,
+                detail="Nenhum município encontrado para esse lote.",
+            )
+
+        progress = register_municipality_batch(
+            batch_index=batch_index,
+            municipalities=selected_batch,
+        )
+
+        return {
+            "message": "Lote municipal registrado com sucesso.",
+            "batch_index": batch_index,
+            "municipalities_in_catalog": len(selected_batch),
+            "progress": progress,
+            "research_started": False,
+            "publishing_enabled": False,
+        }
+
+    except HTTPException:
+        raise
+
+    except MunicipalityCatalogError as exc:
+        logger.exception("Erro ao consultar catálogo municipal do IBGE")
+
+        raise HTTPException(
+            status_code=503,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail=str(exc),
+        ) from exc
+
+    except Exception:
+        logger.exception("Erro ao registrar lote municipal")
+
+        raise HTTPException(
+            status_code=500,
+            detail="Não foi possível registrar o lote municipal.",
         )
 
 
