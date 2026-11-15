@@ -1,4 +1,4 @@
-
+no
 name: Neon Integration Test
 
 on:
@@ -41,5 +41,5 @@ jobs:
           DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
           PYTHONPATH: .
         run: |
-          python tests/test_neon.py
+          python test_neon.py
           
