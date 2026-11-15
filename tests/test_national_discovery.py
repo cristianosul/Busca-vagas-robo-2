@@ -264,8 +264,9 @@ def test_inspect_official_site_delegates_to_company_discovery(
 ):
     expected_pages = [
         national_discovery.CareerPageCandidate(
-            url="https://empresa.example/carreiras",
-            title="Trabalhe conosco",
+            company_name="Empresa Exemplo",
+            page_url="https://empresa.example/carreiras",
+            link_text="Trabalhe conosco",
         )
     ]
 
@@ -291,5 +292,5 @@ def test_inspect_official_site_delegates_to_company_discovery(
     assert captured == {
         "company_name": "Empresa Exemplo",
         "official_site_url": "https://empresa.example",
-}
-  
+    }
+    
