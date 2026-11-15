@@ -7,6 +7,7 @@ from app.repository import (
     DATABASE_URL,
     connect,
     execute,
+    init_db,
     normalize_job_url,
     save_candidate,
 )
@@ -54,7 +55,14 @@ def main():
 
         print("TESTE OK: conexão com PostgreSQL")
 
-        # 2. Conferir as colunas necessárias.
+        # 2. Executar as migrações oficiais do repositório.
+        stage = "execução das migrações"
+
+        init_db()
+
+        print("TESTE OK: migrações executadas")
+
+        # 3. Conferir as colunas necessárias.
         stage = "verificação das colunas"
 
         with connect() as conn:
@@ -99,7 +107,7 @@ def main():
 
         print("TESTE OK: estrutura da tabela candidates")
 
-        # 3. Confirmar a existência de índice único
+        # 4. Confirmar a existência de índice único
         # sobre normalized_url.
         stage = "verificação do índice único"
 
@@ -126,7 +134,7 @@ def main():
 
         print("TESTE OK: índice único de deduplicação")
 
-        # 4. Inserir uma vaga fictícia.
+        # 5. Inserir uma vaga fictícia.
         stage = "inserção da vaga de teste"
 
         first = save_candidate(candidate)
@@ -145,7 +153,7 @@ def main():
 
         print("TESTE OK: vaga fictícia inserida")
 
-        # 5. Verificar duplicidade em nova operação.
+        # 6. Verificar duplicidade.
         stage = "verificação de duplicidade"
 
         second = save_candidate(candidate)
@@ -160,7 +168,7 @@ def main():
 
         print("TESTE OK: duplicidade bloqueada")
 
-        # 6. Conferir persistência em uma conexão independente.
+        # 7. Conferir persistência em conexão independente.
         stage = "verificação dos dados persistidos"
 
         with connect() as conn:
@@ -192,7 +200,7 @@ def main():
 
         print("TESTE OK: persistência confirmada em nova conexão")
 
-        # 7. Validar a estrutura das evidências armazenadas.
+        # 8. Validar as evidências armazenadas.
         stage = "verificação das evidências persistidas"
 
         evidence_data = json.loads(row["evidence_json"] or "{}")
@@ -224,8 +232,6 @@ def main():
         ) from exc
 
     finally:
-        # Só remover o registro se a inserção foi confirmada
-        # e seu ID foi retornado pelo repositório.
         if candidate_id is not None:
             try:
                 with connect() as conn:
@@ -251,4 +257,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-        
+    
