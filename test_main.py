@@ -791,7 +791,15 @@ def test_health_does_not_depend_on_database(
 # VALIDAÇÃO DA CONSULTA WEB
 # =========================
 
-def test_discovery_rejects_query_with_only_spaces(client):
+def test_discovery_rejects_query_with_only_spaces(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setenv(
+        "SOURCE_ADMIN_TOKEN",
+        "test-admin-token",
+    )
+
     response = client.post(
         "/api/discovery/search",
         headers={"X-Admin-Token": "test-admin-token"},
