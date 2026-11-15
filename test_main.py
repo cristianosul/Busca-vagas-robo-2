@@ -640,4 +640,201 @@ def test_discovery_rejects_limit_above_maximum(
     )
 
     assert response.status_code == 422
+
+
+# =========================
+# DISPONIBILIDADE DO BANCO
+# =========================
+
+def test_readiness_database_available(client, monkeypatch):
+    class FakeConnection:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    connection = FakeConnection()
+    captured = {}
+
+    monkeypatch.setattr(
+        main,
+        "connect",
+        lambda: connection,
+    )
+
+    
+def fake_execute(conn, query):
+        captured["connection"] = conn
+        captured["query"] = query
+
+        class FakeResult:
+            def fetchone(self):
+                return (1,)
+
+        return FakeResult()
+
+    monkeypatch.setattr(main, "execute", fake_execute)
+
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"
+    assert response.json()["database"] == "ok"
+    assert response.json()["publishing_enabled"] is False
+    assert captured["connection"] is connection
+    assert captured["query"] == "SELECT 1"
+
+
+def test_readiness_database_connection_failure(client, monkeypatch):
+    def fail():
+        raise RuntimeError("Banco indisponível")
+
+    monkeypatch.setattr(main, "connect", fail)
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["status"] == "not_ready"
+    assert response.json()["detail"]["database"] == "unavailable"
+
+
+def test_readiness_closes_connection_after_success(
+    client,
+    monkeypatch,
+):
+    class FakeConnection:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    connection = FakeConnection()
+
+    monkeypatch.setattr(
+        main,
+        "connect",
+        lambda: connection,
+    )
+
+    class FakeResult:
+        def fetchone(self):
+            return (1,)
+
+    monkeypatch.setattr(
+        main,
+        "execute",
+        lambda conn, query: FakeResult(),
+    )
+
+    response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert connection.closed is True
+
+
+def test_readiness_closes_connection_after_query_failure(
+    client,
+    monkeypatch,
+):
+    class FakeConnection:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    connection = FakeConnection()
+
+    monkeypatch.setattr(
+        main,
+        "connect",
+        lambda: connection,
+    )
+
+    def fail(conn, query):
+        raise RuntimeError("Falha na consulta")
+
+    monkeypatch.setattr(main, "execute", fail)
+
+    response = client.get("/ready")
+
+    assert response.status_code == 503
+    assert connection.closed is True
+
+
+def test_health_does_not_depend_on_database(
+    client,
+    monkeypatch,
+):
+    def fail():
+        raise RuntimeError("Banco indisponível")
+
+    monkeypatch.setattr(main, "connect", fail)
+
+    response = client.get("/health")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+# =========================
+# VALIDAÇÃO DA CONSULTA WEB
+# =========================
+
+def test_discovery_normalizes_query_spaces(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
+    from app.search_engine import SearchResult
+
+    captured = {}
+
+    class FakeTavilyProvider:
+        name = "tavily"
+
+        def search(self, query, *, limit):
+            captured["query"] = query
+
+            return [
+                SearchResult(
+                    title="Empresa Teste",
+                    url="https://empresa.com/carreiras",
+                    snippet="Página de carreiras.",
+                    provider="tavily",
+                )
+            ]
+
+    monkeypatch.setattr(
+        main,
+        "TavilySearchProvider",
+        FakeTavilyProvider,
+    )
+
+    response = client.post(
+        "/api/discovery/search",
+        params={"query": "  Empresa   Teste   carreiras  "},
+        headers={"X-Admin-Token": "token-secreto"},
+    )
+
+    assert response.status_code == 200
+    assert captured["query"] == "Empresa Teste carreiras"
+    assert response.json()["query"] == "Empresa Teste carreiras"
+
+
+def test_discovery_rejects_query_with_only_spaces(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
+
+    response = client.post(
+        "/api/discovery/search",
+        params={"query": "   "},
+        headers={"X-Admin-Token": "token-secreto"},
+    )
+
+    assert response.status_code == 422
+    assert "3 caracteres úteis" in response.json()["detail"]
+    
     
