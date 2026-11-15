@@ -130,13 +130,7 @@ def test_save_candidate_blocks_duplicate(isolated_db):
 
 
 def test_save_candidate_uses_evidence_score(isolated_db):
-    evidence = CandidateEvidence(
-        company_verified=True,
-        original_page_verified=True,
-        application_link_verified=True,
-        job_content_verified=True,
-        date_verified=True,
-    )
+    evidence = make_complete_evidence()
 
     result = repository.save_candidate(
         make_candidate(),
@@ -234,13 +228,7 @@ def test_update_source_status_returns_none_for_missing_source(
 
 
 def test_list_candidates_preserves_all_evidence(isolated_db):
-    evidence = CandidateEvidence(
-        company_verified=True,
-        original_page_verified=True,
-        application_link_verified=True,
-        job_content_verified=True,
-        date_verified=True,
-    )
+    evidence = make_complete_evidence()
 
     repository.save_candidate(make_candidate(), evidence)
 
@@ -257,7 +245,8 @@ def test_list_candidates_preserves_all_evidence(isolated_db):
     assert saved_evidence["application_link_verified"] is True
     assert saved_evidence["job_content_verified"] is True
     assert saved_evidence["date_verified"] is True
-
+    assert len(saved_evidence["evidence_records"]) == 5
+    
 
 def test_list_candidates_preserves_company_relationships(isolated_db):
     data = make_candidate().model_dump()
