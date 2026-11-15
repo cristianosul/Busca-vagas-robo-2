@@ -367,14 +367,33 @@ def mark_municipality_failed(
     return dict(row)
 
 
-def recover_interrupted_municipalities(batch_index: int | None = None):
-    """
-    Devolve municípios que ficaram running para pending.
 
-    As tentativas anteriores são preservadas para auditoria.
+def recover_interrupted_municipalities(
+    batch_index: int | None = None,
+    stale_after_seconds: int = 3600,
+):
+    """
+    Recupera somente municípios com execução aparentemente interrompida.
+
+    Por padrão, uma execução precisa ter mais de uma hora para ser
+    considerada interrompida. O histórico de tentativas é preservado.
     """
     if batch_index is not None:
         batch_index = _validate_batch_index(batch_index)
+
+    if (
+        isinstance(stale_after_seconds, bool)
+        or not isinstance(stale_after_seconds, int)
+        or stale_after_seconds < 0
+    ):
+        raise ValueError(
+            "O prazo de recuperação deve ser um inteiro não negativo."
+        )
+
+    cutoff = (
+        datetime.now(timezone.utc)
+        - timedelta(seconds=stale_after_seconds)
+    ).isoformat()
 
     now = utc_now()
 
@@ -389,8 +408,12 @@ def recover_interrupted_municipalities(batch_index: int | None = None):
                     started_at = NULL,
                     updated_at = ?
                 WHERE status = 'running'
+                  AND (
+                      started_at IS NULL
+                      OR started_at < ?
+                  )
                 """,
-                (now,),
+                (now, cutoff),
             )
         else:
             cursor = execute(
@@ -403,9 +426,13 @@ def recover_interrupted_municipalities(batch_index: int | None = None):
                     updated_at = ?
                 WHERE status = 'running'
                   AND batch_index = ?
+                  AND (
+                      started_at IS NULL
+                      OR started_at < ?
+                  )
                 """,
-                (now, batch_index),
+                (now, batch_index, cutoff),
             )
 
         return cursor.rowcount
-  
+        
