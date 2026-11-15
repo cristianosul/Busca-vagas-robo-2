@@ -1,6 +1,9 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
+
+import httpx
 
 from app.company_discovery import (
     CareerPageCandidate,
@@ -18,6 +21,13 @@ from app.search_engine import (
 
 
 MAX_NATIONAL_QUERIES = 60
+MAX_MUNICIPALITIES_PER_BATCH = 60
+
+IBGE_MUNICIPALITIES_URL = (
+    "https://servicodados.ibge.gov.br/api/v1/localidades/municipios"
+)
+
+IBGE_TIMEOUT = 15.0
 
 
 NATIONAL_SEARCHES = {
@@ -98,6 +108,17 @@ STATE_SEARCHES = {
 }
 
 
+class MunicipalityCatalogError(RuntimeError):
+    """Erro ao consultar ou interpretar o cadastro municipal do IBGE."""
+
+
+@dataclass(frozen=True)
+class Municipality:
+    code: str
+    name: str
+    state: str
+
+
 @dataclass(frozen=True)
 class DiscoveryQueryError:
     query: str
@@ -112,6 +133,8 @@ class DiscoveryMatch:
     query: str
     normalized_url: str
     result: SearchResult
+    municipality: str | None = None
+    state: str | None = None
 
 
 @dataclass(frozen=True)
@@ -120,6 +143,182 @@ class NationalDiscoveryReport:
     results: tuple[SearchResult, ...]
     errors: tuple[DiscoveryQueryError, ...]
     matches: tuple[DiscoveryMatch, ...] = ()
+
+
+def _extract_municipality_state(item: dict) -> str | None:
+    """Obtém a UF considerando a estrutura atual e a estrutura legada do IBGE."""
+
+    immediate = item.get("regiao-imediata") or {}
+    intermediate = immediate.get("regiao-intermediaria") or {}
+    uf = intermediate.get("UF") or {}
+
+    if uf.get("sigla"):
+        return uf["sigla"]
+
+    microregion = item.get("microrregiao") or {}
+    mesoregion = microregion.get("mesorregiao") or {}
+    uf = mesoregion.get("UF") or {}
+
+    return uf.get("sigla")
+
+
+@lru_cache(maxsize=1)
+def load_brazilian_municipalities() -> tuple[Municipality, ...]:
+    """Carrega e valida o cadastro nacional de municípios do IBGE.
+
+    O resultado fica em cache durante a execução do processo.
+    """
+
+    try:
+        response = httpx.get(
+            IBGE_MUNICIPALITIES_URL,
+            params={"orderBy": "nome"},
+            timeout=IBGE_TIMEOUT,
+            follow_redirects=False,
+            trust_env=False,
+            headers={
+                "User-Agent": (
+                    "BuscaVagasBot/0.1 "
+                    "(public Brazilian municipality catalog)"
+                )
+            },
+        )
+        response.raise_for_status()
+
+    except httpx.HTTPError as exc:
+        raise MunicipalityCatalogError(
+            "Não foi possível consultar o cadastro municipal do IBGE."
+        ) from exc
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise MunicipalityCatalogError(
+            "O IBGE retornou uma resposta JSON inválida."
+        ) from exc
+
+    if not isinstance(payload, list) or not payload:
+        raise MunicipalityCatalogError(
+            "O cadastro municipal do IBGE está vazio ou inválido."
+        )
+
+    municipalities = []
+    seen_codes = set()
+
+    for item in payload:
+        if not isinstance(item, dict):
+            raise MunicipalityCatalogError(
+                "O cadastro contém um município inválido."
+            )
+
+        code = item.get("id")
+        name = item.get("nome")
+        state = _extract_municipality_state(item)
+
+        if (
+            isinstance(code, bool)
+            or not isinstance(code, int)
+            or not isinstance(name, str)
+            or not name.strip()
+            or not isinstance(state, str)
+            or len(state) != 2
+        ):
+            raise MunicipalityCatalogError(
+                "O cadastro contém dados municipais incompletos."
+            )
+
+        if code in seen_codes:
+            continue
+
+        seen_codes.add(code)
+
+        municipalities.append(
+            Municipality(
+                code=str(code),
+                name=name.strip(),
+                state=state.upper(),
+            )
+        )
+
+    if not municipalities:
+        raise MunicipalityCatalogError(
+            "Nenhum município válido foi encontrado no cadastro do IBGE."
+        )
+
+    return tuple(
+        sorted(
+            municipalities,
+            key=lambda municipality: (
+                municipality.state,
+                municipality.name.casefold(),
+                municipality.code,
+            ),
+        )
+    )
+
+
+def build_municipal_queries(
+    batch_index: int = 0,
+) -> tuple[tuple[str, str, str, str], ...]:
+    """Cria as consultas de um lote municipal.
+
+    Cada item contém:
+    (categoria, consulta, município, UF).
+    """
+
+    if (
+        isinstance(batch_index, bool)
+        or not isinstance(batch_index, int)
+        or batch_index < 0
+    ):
+        raise ValueError(
+            "batch_index deve ser um inteiro não negativo."
+        )
+
+    municipalities = load_brazilian_municipalities()
+
+    start = batch_index * MAX_MUNICIPALITIES_PER_BATCH
+    end = start + MAX_MUNICIPALITIES_PER_BATCH
+
+    if start >= len(municipalities):
+        raise ValueError(
+            "O lote informado está fora do intervalo de municípios."
+        )
+
+    batch = municipalities[start:end]
+    query_items = []
+
+    for municipality in batch:
+        query = (
+            "vagas de emprego empresas contratando agências de emprego "
+            f"SINE {municipality.name} {municipality.state}"
+        )
+
+        if len(query) > MAX_QUERY_LENGTH:
+            raise MunicipalityCatalogError(
+                "Uma consulta municipal ultrapassou o limite permitido."
+            )
+
+        query_items.append(
+            (
+                f"municipality:{municipality.state}",
+                query,
+                municipality.name,
+                municipality.state,
+            )
+        )
+
+    return tuple(query_items)
+
+
+def municipality_batch_count() -> int:
+    """Retorna o número de lotes necessários para percorrer os municípios."""
+
+    total = len(load_brazilian_municipalities())
+
+    return (
+        total + MAX_MUNICIPALITIES_PER_BATCH - 1
+    ) // MAX_MUNICIPALITIES_PER_BATCH
 
 
 class NationalDiscoveryCoordinator:
@@ -140,7 +339,6 @@ class NationalDiscoveryCoordinator:
                 f"O limite deve ser um inteiro entre 1 e {MAX_RESULTS}."
             )
 
-    
     @staticmethod
     def _normalize_categories(categories):
         if categories is None:
@@ -178,7 +376,6 @@ class NationalDiscoveryCoordinator:
                 normalized.append(category)
 
         return normalized
-        
 
     @staticmethod
     def _build_query_items(
@@ -236,7 +433,7 @@ class NationalDiscoveryCoordinator:
 
     def _run_queries(
         self,
-        query_items: Sequence[tuple[str, str]],
+        query_items: Sequence[tuple],
         limit_per_query: int,
     ):
         self._validate_limit(limit_per_query)
@@ -251,7 +448,20 @@ class NationalDiscoveryCoordinator:
         matches = []
         seen_urls = set()
 
-        for category, query in query_items:
+        for item in query_items:
+            if len(item) == 2:
+                category, query = item
+                municipality = None
+                state = None
+
+            elif len(item) == 4:
+                category, query, municipality, state = item
+
+            else:
+                raise ValueError(
+                    "Formato inválido de consulta de pesquisa."
+                )
+
             try:
                 found = self.search_engine.search(
                     query,
@@ -267,6 +477,8 @@ class NationalDiscoveryCoordinator:
                             query=query,
                             normalized_url=normalized_url,
                             result=result,
+                            municipality=municipality,
+                            state=state,
                         )
                     )
 
@@ -285,7 +497,7 @@ class NationalDiscoveryCoordinator:
                 )
 
         return NationalDiscoveryReport(
-            queries=tuple(query for _, query in query_items),
+            queries=tuple(item[1] for item in query_items),
             results=tuple(results),
             errors=tuple(errors),
             matches=tuple(matches),
@@ -310,6 +522,24 @@ class NationalDiscoveryCoordinator:
         query_items = self._build_query_items(
             categories=categories,
             include_geography=include_geography,
+        )
+
+        return self._run_queries(
+            query_items,
+            limit_per_query,
+        )
+
+    def search_municipalities(
+        self,
+        batch_index: int = 0,
+        limit_per_query: int = 10,
+    ):
+        """Pesquisa vagas em um lote de municípios brasileiros."""
+
+        self._validate_limit(limit_per_query)
+
+        query_items = build_municipal_queries(
+            batch_index=batch_index,
         )
 
         return self._run_queries(
