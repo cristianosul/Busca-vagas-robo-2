@@ -57,12 +57,23 @@ class DiscoveryQueryError:
 
 
 @dataclass(frozen=True)
+class DiscoveryMatch:
+    """Registra a origem de um resultado de pesquisa."""
+
+    category: str
+    query: str
+    normalized_url: str
+    result: SearchResult
+
+
+@dataclass(frozen=True)
 class NationalDiscoveryReport:
     """Resultado organizado de uma operação de pesquisa."""
 
     queries: tuple[str, ...]
     results: tuple[SearchResult, ...]
     errors: tuple[DiscoveryQueryError, ...]
+    matches: tuple[DiscoveryMatch, ...] = ()
 
 
 class NationalDiscoveryCoordinator:
@@ -168,18 +179,19 @@ class NationalDiscoveryCoordinator:
 
     def _run_queries(
         self,
-        queries: Sequence[str],
+        query_items: Sequence[tuple[str, str]],
         limit_per_query: int,
     ) -> NationalDiscoveryReport:
-        """Executa consultas, registra falhas e elimina duplicidades."""
+        """Executa consultas e preserva a origem de cada resultado."""
 
         self._validate_limit(limit_per_query)
 
         results = []
+        matches = []
         errors = []
         seen_urls = set()
 
-        for query in queries:
+        for category, query in query_items:
             try:
                 search_results = self.search_engine.search(
                     query,
@@ -198,6 +210,15 @@ class NationalDiscoveryCoordinator:
             for result in search_results:
                 normalized_url = normalize_search_url(result.url)
 
+                matches.append(
+                    DiscoveryMatch(
+                        category=category,
+                        query=query,
+                        normalized_url=normalized_url,
+                        result=result,
+                    )
+                )
+
                 if normalized_url in seen_urls:
                     continue
 
@@ -205,9 +226,10 @@ class NationalDiscoveryCoordinator:
                 results.append(result)
 
         return NationalDiscoveryReport(
-            queries=tuple(queries),
+            queries=tuple(query for _, query in query_items),
             results=tuple(results),
             errors=tuple(errors),
+            matches=tuple(matches),
         )
 
     def search_national(
@@ -229,8 +251,24 @@ class NationalDiscoveryCoordinator:
 
         queries = self.build_national_queries(categories)
 
+        if categories is None:
+            selected_categories = list(NATIONAL_SEARCHES)
+        else:
+            selected_categories = list(
+                dict.fromkeys(
+                    category.strip().lower()
+                    for category in categories
+                )
+            )
+
+        query_items = [
+            (category, query)
+            for category in selected_categories
+            for query in NATIONAL_SEARCHES[category]
+        ]
+
         return self._run_queries(
-            queries,
+            query_items,
             limit_per_query,
         )
 
@@ -243,8 +281,13 @@ class NationalDiscoveryCoordinator:
 
         queries = build_company_queries(company_name)
 
+        query_items = [
+            ("company", query)
+            for query in queries
+        ]
+
         return self._run_queries(
-            queries,
+            query_items,
             limit_per_query,
         )
 
@@ -264,3 +307,4 @@ class NationalDiscoveryCoordinator:
             company_name,
             official_site_url,
         )
+        
