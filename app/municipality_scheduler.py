@@ -1,7 +1,7 @@
 
 from datetime import datetime, timedelta, timezone
 
-from app.repository import db_session, execute
+from app.repository import DATABASE_URL, db_session, execute
 
 
 def utc_now() -> str:
@@ -37,8 +37,10 @@ def _municipality_data(municipality):
     if not code or not name or len(state) != 2:
         raise ValueError("Dados de município inválidos.")
 
-    if not code.isdigit():
-        raise ValueError("O código IBGE deve conter somente números.")
+    if len(code) != 7 or not code.isdigit():
+        raise ValueError(
+            "O código IBGE deve conter exatamente sete dígitos."
+        )
 
     return code, name, state
 
@@ -150,8 +152,8 @@ def register_municipality_batch(batch_index: int, municipalities):
             )
 
     return get_batch_progress(batch_index)
-    
-    
+
+
 def get_current_batch():
     """Retorna o lote atual ou None se ainda não houver estado salvo."""
     with db_session() as conn:
@@ -239,66 +241,113 @@ def list_batch_municipalities(batch_index: int, status: str | None = None):
 
 def claim_next_municipality(batch_index: int):
     """
-    Reserva atomicamente o próximo município pendente.
+    Reserva o próximo município pendente.
 
-    O status só muda para running se ainda estiver pending,
-    evitando que dois processos reservem o mesmo município.
+    PostgreSQL utiliza FOR UPDATE SKIP LOCKED.
+    SQLite utiliza BEGIN IMMEDIATE.
     """
     batch_index = _validate_batch_index(batch_index)
+    is_postgres = bool(DATABASE_URL)
 
-    for _ in range(3):
-        with db_session(immediate=True) as conn:
+    with db_session(immediate=True) as conn:
+        if is_postgres:
             row = execute(
                 conn,
                 """
                 SELECT municipality_code
                 FROM municipality_discovery
-                WHERE batch_index = ? AND status = 'pending'
+                WHERE batch_index = ?
+                  AND status = 'pending'
+                ORDER BY state, municipality_name
+                LIMIT 1
+                FOR UPDATE SKIP LOCKED
+                """,
+                (batch_index,),
+            ).fetchone()
+        else:
+            row = execute(
+                conn,
+                """
+                SELECT municipality_code
+                FROM municipality_discovery
+                WHERE batch_index = ?
+                  AND status = 'pending'
                 ORDER BY state, municipality_name
                 LIMIT 1
                 """,
                 (batch_index,),
             ).fetchone()
 
-            if not row:
-                return None
+        if not row:
+            return None
 
-            now = utc_now()
+        now = utc_now()
 
-            claimed = execute(
-                conn,
-                """
-                UPDATE municipality_discovery
-                SET status = 'running',
-                    attempts = attempts + 1,
-                    error = NULL,
-                    started_at = ?,
-                    completed_at = NULL,
-                    updated_at = ?
-                WHERE municipality_code = ?
-                  AND batch_index = ?
-                  AND status = 'pending'
-                RETURNING *
-                """,
-                (
-                    now,
-                    now,
-                    row["municipality_code"],
-                    batch_index,
-                ),
-            ).fetchone()
+        claimed = execute(
+            conn,
+            """
+            UPDATE municipality_discovery
+            SET status = 'running',
+                attempts = attempts + 1,
+                error = NULL,
+                started_at = ?,
+                completed_at = NULL,
+                updated_at = ?
+            WHERE municipality_code = ?
+              AND batch_index = ?
+              AND status = 'pending'
+            RETURNING *
+            """,
+            (
+                now,
+                now,
+                row["municipality_code"],
+                batch_index,
+            ),
+        ).fetchone()
 
-            if claimed:
-                return dict(claimed)
+        return dict(claimed) if claimed else None
 
-    return None
+
+def heartbeat_municipality(municipality_code: str):
+    """
+    Renova a atividade de um município em execução.
+
+    Atualiza updated_at sem reiniciar a contagem de tentativas.
+    """
+    code = str(municipality_code).strip()
+
+    if len(code) != 7 or not code.isdigit():
+        raise ValueError("Código IBGE inválido.")
+
+    now = utc_now()
+
+    with db_session(immediate=True) as conn:
+        row = execute(
+            conn,
+            """
+            UPDATE municipality_discovery
+            SET updated_at = ?
+            WHERE municipality_code = ?
+              AND status = 'running'
+            RETURNING *
+            """,
+            (now, code),
+        ).fetchone()
+
+    if not row:
+        raise ValueError(
+            "Município não encontrado ou não está em execução."
+        )
+
+    return dict(row)
 
 
 def mark_municipality_completed(municipality_code: str):
     """Marca como concluído um município que estava em execução."""
     code = str(municipality_code).strip()
 
-    if not code:
+    if len(code) != 7 or not code.isdigit():
         raise ValueError("Código IBGE inválido.")
 
     now = utc_now()
@@ -335,7 +384,7 @@ def mark_municipality_failed(
     code = str(municipality_code).strip()
     message = str(error).strip()[:2000]
 
-    if not code:
+    if len(code) != 7 or not code.isdigit():
         raise ValueError("Código IBGE inválido.")
 
     if not message:
@@ -367,16 +416,68 @@ def mark_municipality_failed(
     return dict(row)
 
 
+def retry_failed_municipality(
+    municipality_code: str,
+    max_attempts: int = 3,
+):
+    """
+    Devolve um município com falha para pending.
+
+    Preserva o histórico de tentativas e impede novas tentativas
+    quando o limite configurado já foi atingido.
+    """
+    code = str(municipality_code).strip()
+
+    if len(code) != 7 or not code.isdigit():
+        raise ValueError("Código IBGE inválido.")
+
+    if (
+        isinstance(max_attempts, bool)
+        or not isinstance(max_attempts, int)
+        or max_attempts < 1
+    ):
+        raise ValueError(
+            "O limite de tentativas deve ser um inteiro positivo."
+        )
+
+    now = utc_now()
+
+    with db_session(immediate=True) as conn:
+        row = execute(
+            conn,
+            """
+            UPDATE municipality_discovery
+            SET status = 'pending',
+                error = NULL,
+                started_at = NULL,
+                completed_at = NULL,
+                updated_at = ?
+            WHERE municipality_code = ?
+              AND status = 'failed'
+              AND attempts < ?
+            RETURNING *
+            """,
+            (now, code, max_attempts),
+        ).fetchone()
+
+    if not row:
+        raise ValueError(
+            "Município não encontrado, não está com falha "
+            "ou atingiu o limite de tentativas."
+        )
+
+    return dict(row)
+
 
 def recover_interrupted_municipalities(
     batch_index: int | None = None,
     stale_after_seconds: int = 3600,
 ):
     """
-    Recupera somente municípios com execução aparentemente interrompida.
+    Recupera somente municípios sem atividade recente.
 
-    Por padrão, uma execução precisa ter mais de uma hora para ser
-    considerada interrompida. O histórico de tentativas é preservado.
+    O prazo considera updated_at, permitindo que o heartbeat
+    renove a reserva sem alterar started_at.
     """
     if batch_index is not None:
         batch_index = _validate_batch_index(batch_index)
@@ -408,10 +509,7 @@ def recover_interrupted_municipalities(
                     started_at = NULL,
                     updated_at = ?
                 WHERE status = 'running'
-                  AND (
-                      started_at IS NULL
-                      OR started_at < ?
-                  )
+                  AND updated_at < ?
                 """,
                 (now, cutoff),
             )
@@ -426,10 +524,7 @@ def recover_interrupted_municipalities(
                     updated_at = ?
                 WHERE status = 'running'
                   AND batch_index = ?
-                  AND (
-                      started_at IS NULL
-                      OR started_at < ?
-                  )
+                  AND updated_at < ?
                 """,
                 (now, batch_index, cutoff),
             )
