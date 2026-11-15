@@ -612,7 +612,21 @@ def list_candidates(status: str | None = None, limit: int = 50):
 
     for row in rows:
         payload = json.loads(row["payload_json"] or "{}")
-        evidence = json.loads(row["evidence_json"] or "{}")
+
+        try:
+            evidence_data = json.loads(
+                row["evidence_json"] or "{}"
+            )
+
+            evidence = CandidateEvidence.model_validate(
+                evidence_data
+            ).model_dump(mode="json")
+
+        except Exception as exc:
+            raise RuntimeError(
+                "Evidências inválidas ou corrompidas "
+                f"na oportunidade ID {row['id']}."
+            ) from exc
 
         results.append({
             "id": row["id"],
@@ -638,3 +652,4 @@ def list_candidates(status: str | None = None, limit: int = 50):
         })
 
     return results
+    
