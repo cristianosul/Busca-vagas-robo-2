@@ -1,5 +1,5 @@
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.repository import db_session, execute
 
@@ -86,6 +86,7 @@ def register_municipality_batch(batch_index: int, municipalities):
     Registra os municípios de um lote sem duplicar códigos IBGE.
 
     Municípios já cadastrados não têm seu estado ou lote sobrescritos.
+    O lote atual só avança quando novos municípios são registrados.
     """
     batch_index = _validate_batch_index(batch_index)
     records = [_municipality_data(item) for item in municipalities]
@@ -102,10 +103,11 @@ def register_municipality_batch(batch_index: int, municipalities):
         raise ValueError("O lote contém códigos IBGE duplicados.")
 
     now = utc_now()
+    inserted_count = 0
 
     with db_session(immediate=True) as conn:
         for code, name, state in records:
-            execute(
+            cur = execute(
                 conn,
                 """
                 INSERT INTO municipality_discovery (
@@ -124,23 +126,32 @@ def register_municipality_batch(batch_index: int, municipalities):
                 (code, name, state, batch_index, now, now),
             )
 
-        execute(
-            conn,
-            """
-            INSERT INTO municipality_scheduler_state (
-                state_id, current_batch, updated_at
+            if cur.rowcount > 0:
+                inserted_count += 1
+
+        if inserted_count > 0:
+            execute(
+                conn,
+                """
+                INSERT INTO municipality_scheduler_state (
+                    state_id, current_batch, updated_at
+                )
+                VALUES (1, ?, ?)
+                ON CONFLICT(state_id) DO UPDATE SET
+                    current_batch = CASE
+                        WHEN excluded.current_batch >
+                             municipality_scheduler_state.current_batch
+                        THEN excluded.current_batch
+                        ELSE municipality_scheduler_state.current_batch
+                    END,
+                    updated_at = excluded.updated_at
+                """,
+                (batch_index, now),
             )
-            VALUES (1, ?, ?)
-            ON CONFLICT(state_id) DO UPDATE SET
-                current_batch = excluded.current_batch,
-                updated_at = excluded.updated_at
-            """,
-            (batch_index, now),
-        )
 
     return get_batch_progress(batch_index)
-
-
+    
+    
 def get_current_batch():
     """Retorna o lote atual ou None se ainda não houver estado salvo."""
     with db_session() as conn:
