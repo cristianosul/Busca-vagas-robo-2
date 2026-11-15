@@ -818,4 +818,86 @@ def test_ibge_rejects_non_list_catalog(monkeypatch):
         national_discovery.load_brazilian_municipalities()
 
     national_discovery.load_brazilian_municipalities.cache_clear()
+
+
+def test_ibge_deduplicates_repeated_municipality_codes(monkeypatch):
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+    payload = [
+        make_ibge_municipality(4300034, "Aceguá", "RS"),
+        make_ibge_municipality(4300034, "Aceguá Duplicado", "RS"),
+        make_ibge_municipality(4300059, "Água Santa", "RS"),
+    ]
+
+    mock_ibge_response(monkeypatch, payload)
+
+    municipalities = (
+        national_discovery.load_brazilian_municipalities()
+    )
+
+    codes = [municipality.code for municipality in municipalities]
+
+    assert len(codes) == len(set(codes))
+    assert len(municipalities) == 2
+    assert "Aceguá Duplicado" not in {
+        municipality.name for municipality in municipalities
+    }
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+
+def test_load_municipalities_supports_legacy_ibge_structure(
+    monkeypatch,
+):
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+    payload = [
+        {
+            "id": 4300034,
+            "nome": "Aceguá",
+            "microrregiao": {
+                "mesorregiao": {
+                    "UF": {
+                        "sigla": "RS",
+                    }
+                }
+            },
+        },
+    ]
+
+    mock_ibge_response(monkeypatch, payload)
+
+    municipalities = (
+        national_discovery.load_brazilian_municipalities()
+    )
+
+    assert len(municipalities) == 1
+    assert municipalities[0].code == "4300034"
+    assert municipalities[0].name == "Aceguá"
+    assert municipalities[0].state == "RS"
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+
+def test_ibge_connection_failure_raises_catalog_error(monkeypatch):
+    import httpx
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+    def fake_get(*args, **kwargs):
+        raise httpx.ConnectError("Falha de conexão simulada")
+
+    monkeypatch.setattr(
+        national_discovery.httpx,
+        "get",
+        fake_get,
+    )
+
+    with pytest.raises(
+        national_discovery.MunicipalityCatalogError
+    ):
+        national_discovery.load_brazilian_municipalities()
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+    
     
