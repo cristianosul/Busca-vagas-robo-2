@@ -140,6 +140,7 @@ class NationalDiscoveryCoordinator:
                 f"O limite deve ser um inteiro entre 1 e {MAX_RESULTS}."
             )
 
+    
     @staticmethod
     def _normalize_categories(categories):
         if categories is None:
@@ -154,6 +155,11 @@ class NationalDiscoveryCoordinator:
             raise ValueError(
                 "As categorias devem ser uma sequência."
             ) from exc
+
+        if not selected:
+            raise ValueError(
+                "Informe pelo menos uma categoria de pesquisa."
+            )
 
         normalized = []
 
@@ -172,6 +178,7 @@ class NationalDiscoveryCoordinator:
                 normalized.append(category)
 
         return normalized
+        
 
     @staticmethod
     def _build_query_items(
