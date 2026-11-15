@@ -791,37 +791,12 @@ def test_health_does_not_depend_on_database(
 # VALIDAÇÃO DA CONSULTA WEB
 # =========================
 
-def test_discovery_normalizes_query_spaces(
-    client,
-    monkeypatch,
-):
-    from app.search_engine import SearchResult
-
-    monkeypatch.setenv("SOURCE_ADMIN_TOKEN", "token-secreto")
-
-    captured = {}
-
-    class FakeTavilyProvider:
-        name = "tavily"
-
-        def search(self, query, *, limit):
-            captured["query"] = query
-
-            return [
-                SearchResult(
-                    title="Empresa Teste",
-                    url="https://empresa.com/carreiras",
-                    snippet="Página de carreiras.",
-                    provider="tavily",
-                )
-            ]
-
-    monkeypatch.setattr(
-        main,
-        "TavilySearchProvider",
-        FakeTavilyProvider,
-    )
-
+def test_discovery_rejects_query_with_only_spaces(client):
     response = client.post(
         "/api/discovery/search",
-        params={"query": " 
+        headers={"X-Admin-Token": "test-admin-token"},
+        params={"query": "   "},
+    )
+
+    assert response.status_code == 422
+    assert "3 caracteres úteis" in response.json()["detail"]
