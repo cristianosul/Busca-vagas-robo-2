@@ -692,3 +692,130 @@ def test_ibge_cache_avoids_repeated_requests(monkeypatch):
 
     national_discovery.load_brazilian_municipalities.cache_clear()
     
+
+def test_all_municipal_batches_cover_catalog_without_duplicates(
+    monkeypatch,
+):
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+    payload = [
+        make_ibge_municipality(
+            4300000 + index,
+            f"Municipio {index:03d}",
+            "RS",
+        )
+        for index in range(121)
+    ]
+
+    mock_ibge_response(monkeypatch, payload)
+
+    batch_count = national_discovery.municipality_batch_count()
+
+    all_batches = [
+        national_discovery.build_municipal_queries(batch_index)
+        for batch_index in range(batch_count)
+    ]
+
+    all_names = [
+        item[2]
+        for batch in all_batches
+        for item in batch
+    ]
+
+    expected_names = {
+        f"Municipio {index:03d}"
+        for index in range(121)
+    }
+
+    assert len(all_names) == 121
+    assert len(set(all_names)) == 121
+    assert set(all_names) == expected_names
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+
+def test_last_municipality_batch_contains_remaining_city(
+    monkeypatch,
+):
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+    payload = [
+        make_ibge_municipality(
+            4300000 + index,
+            f"Municipio {index:03d}",
+            "RS",
+        )
+        for index in range(61)
+    ]
+
+    mock_ibge_response(monkeypatch, payload)
+
+    first_batch = national_discovery.build_municipal_queries(0)
+    last_batch = national_discovery.build_municipal_queries(1)
+
+    assert len(first_batch) == 60
+    assert len(last_batch) == 1
+    assert last_batch[0][2] == "Municipio 060"
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "invalid_payload",
+    [
+        [
+            {
+                "id": 4300001,
+                "nome": "Cidade sem UF",
+            }
+        ],
+        [
+            make_ibge_municipality(
+                "codigo-invalido",
+                "Cidade com código inválido",
+                "RS",
+            )
+        ],
+        [
+            make_ibge_municipality(
+                4300001,
+                "",
+                "RS",
+            )
+        ],
+        [
+            "registro inválido",
+        ],
+    ],
+)
+def test_ibge_rejects_incomplete_or_invalid_municipalities(
+    monkeypatch,
+    invalid_payload,
+):
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+    mock_ibge_response(monkeypatch, invalid_payload)
+
+    with pytest.raises(
+        national_discovery.MunicipalityCatalogError
+    ):
+        national_discovery.load_brazilian_municipalities()
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+
+def test_ibge_rejects_non_list_catalog(monkeypatch):
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+    mock_ibge_response(
+        monkeypatch,
+        {"erro": "resposta inválida"},
+    )
+
+    with pytest.raises(
+        national_discovery.MunicipalityCatalogError
+    ):
+        national_discovery.load_brazilian_municipalities()
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+    
