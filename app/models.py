@@ -9,6 +9,7 @@ from pydantic import (
     Field,
     HttpUrl,
     field_validator,
+    model_validator,
 )
 
 
@@ -138,6 +139,35 @@ class CandidateEvidence(BaseModel):
         default=None,
         max_length=500,
     )
+
+    @model_validator(mode="after")
+    def validate_verified_evidence(self):
+        """Exige registro comprobatório para cada critério marcado como verificado."""
+
+        for criterion in (
+            "company_verified",
+            "original_page_verified",
+            "application_link_verified",
+            "job_content_verified",
+            "date_verified",
+        ):
+            if not getattr(self, criterion):
+                continue
+
+            has_verified_record = any(
+                record.criterion == criterion
+                and record.result == "verified"
+                for record in self.evidence_records
+            )
+
+            if not has_verified_record:
+                raise ValueError(
+                    f"O critério '{criterion}' não pode ser verdadeiro "
+                    "sem um registro de evidência correspondente "
+                    "com resultado 'verified'."
+                )
+
+        return self
 
 
 class SourceCreate(BaseModel):
