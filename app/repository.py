@@ -316,7 +316,16 @@ def init_db():
         ).fetchall()
 
         for row in rows:
-            normalized = normalize_job_url(row["original_job_url"])
+            try:
+                normalized = normalize_job_url(
+                    row["original_job_url"]
+                )
+            except ValueError as exc:
+                raise RuntimeError(
+                    "Migração interrompida: URL original inválida "
+                    f"na oportunidade ID {row['id']}. "
+                    "Nenhum registro foi apagado."
+                ) from exc
 
             execute(
                 conn,
@@ -326,7 +335,7 @@ def init_db():
                 WHERE id = ?
                 """,
                 (normalized, row["id"]),
-            )
+            )            
 
         duplicates = execute(
             conn,
