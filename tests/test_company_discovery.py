@@ -1401,4 +1401,61 @@ def test_dns_stops_when_global_deadline_expires_between_queries(
             130.0,
         )
     assert dns_calls == [("example.com", "A")]
-        
+
+
+def test_rejects_company_name_over_maximum_length():
+    company_name = "A" * (
+        discovery.MAX_COMPANY_NAME_LENGTH + 1
+    )
+
+    with pytest.raises(ValueError):
+        discovery.discover_career_pages(
+            company_name,
+            "https://example.com",
+        )
+
+
+def test_rejects_official_site_url_over_maximum_length():
+    url = (
+        "https://example.com/"
+        + "a" * discovery.MAX_URL_LENGTH
+    )
+
+    with pytest.raises(ValueError):
+        discovery.discover_career_pages(
+            "Empresa Exemplo",
+            url,
+        )
+
+
+def test_limits_number_of_discovered_links(monkeypatch):
+    links = "".join(
+        f'<a href="/careers/{number}">Carreiras</a>'
+        for number in range(discovery.MAX_LINKS + 1)
+    )
+
+    html = f"""
+    <html>
+      <body>
+        {links}
+      </body>
+    </html>
+    """
+
+    def handler(request):
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/html"},
+            text=html,
+            request=request,
+        )
+
+    install_mock_site(monkeypatch, handler)
+
+    results = discovery.discover_career_pages(
+        "Empresa Exemplo",
+        "https://example.com",
+    )
+
+    assert len(results) <= discovery.MAX_LINKS
+    
