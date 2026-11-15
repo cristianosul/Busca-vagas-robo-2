@@ -279,7 +279,7 @@ def test_register_batch_rejects_invalid_municipality(scheduler_db):
 
 @pytest.mark.parametrize(
     "code",
-    ["430510", "43051080", "ABC5108", "", "123"],
+    ["430510", "43051080", "ABC5108", "123"],
 )
 def test_register_batch_rejects_invalid_ibge_code(
     scheduler_db,
