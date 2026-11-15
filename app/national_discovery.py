@@ -19,7 +19,7 @@ from app.search_engine import (
 
 MAX_NATIONAL_QUERIES = 60
 
-# Categorias independentes de pesquisa nacional.
+
 NATIONAL_SEARCHES = {
     "companies": (
         "empresas contratando no Brasil página oficial carreiras vagas",
@@ -48,10 +48,58 @@ NATIONAL_SEARCHES = {
 }
 
 
+REGIONAL_SEARCHES = {
+    "region:norte": (
+        "fontes oficiais empresas contratando agências de emprego SINE vagas Norte Brasil",
+    ),
+    "region:nordeste": (
+        "fontes oficiais empresas contratando agências de emprego SINE vagas Nordeste Brasil",
+    ),
+    "region:centro-oeste": (
+        "fontes oficiais empresas contratando agências de emprego SINE vagas Centro-Oeste Brasil",
+    ),
+    "region:sudeste": (
+        "fontes oficiais empresas contratando agências de emprego SINE vagas Sudeste Brasil",
+    ),
+    "region:sul": (
+        "fontes oficiais empresas contratando agências de emprego SINE vagas Sul Brasil",
+    ),
+}
+
+
+STATE_SEARCHES = {
+    "state:AC": "Acre",
+    "state:AL": "Alagoas",
+    "state:AP": "Amapá",
+    "state:AM": "Amazonas",
+    "state:BA": "Bahia",
+    "state:CE": "Ceará",
+    "state:DF": "Distrito Federal",
+    "state:ES": "Espírito Santo",
+    "state:GO": "Goiás",
+    "state:MA": "Maranhão",
+    "state:MT": "Mato Grosso",
+    "state:MS": "Mato Grosso do Sul",
+    "state:MG": "Minas Gerais",
+    "state:PA": "Pará",
+    "state:PB": "Paraíba",
+    "state:PR": "Paraná",
+    "state:PE": "Pernambuco",
+    "state:PI": "Piauí",
+    "state:RJ": "Rio de Janeiro",
+    "state:RN": "Rio Grande do Norte",
+    "state:RS": "Rio Grande do Sul",
+    "state:RO": "Rondônia",
+    "state:RR": "Roraima",
+    "state:SC": "Santa Catarina",
+    "state:SP": "São Paulo",
+    "state:SE": "Sergipe",
+    "state:TO": "Tocantins",
+}
+
+
 @dataclass(frozen=True)
 class DiscoveryQueryError:
-    """Registra uma falha ocorrida em uma consulta."""
-
     query: str
     message: str
 
@@ -68,8 +116,6 @@ class DiscoveryMatch:
 
 @dataclass(frozen=True)
 class NationalDiscoveryReport:
-    """Resultado organizado de uma operação de pesquisa."""
-
     queries: tuple[str, ...]
     results: tuple[SearchResult, ...]
     errors: tuple[DiscoveryQueryError, ...]
@@ -77,126 +123,151 @@ class NationalDiscoveryReport:
 
 
 class NationalDiscoveryCoordinator:
-    """
-    Coordena pesquisas nacionais e descoberta de páginas de carreira.
-
-    Não cadastra fontes, não armazena oportunidades e não publica vagas.
-    """
-
     def __init__(self, search_engine: SearchEngine):
         if not isinstance(search_engine, SearchEngine):
-            raise ValueError(
-                "É necessário fornecer uma instância válida de SearchEngine."
-            )
+            raise ValueError("Um SearchEngine válido é obrigatório.")
 
         self.search_engine = search_engine
 
     @staticmethod
-    def _validate_limit(limit: int) -> None:
-        if isinstance(limit, bool) or not isinstance(limit, int):
-            raise ValueError("O limite precisa ser um número inteiro.")
-
-        if not 1 <= limit <= MAX_RESULTS:
+    def _validate_limit(limit: int):
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or not 1 <= limit <= MAX_RESULTS
+        ):
             raise ValueError(
-                f"O limite precisa estar entre 1 e {MAX_RESULTS}."
+                f"O limite deve ser um inteiro entre 1 e {MAX_RESULTS}."
             )
 
     @staticmethod
-    def build_national_queries(
-        categories: Sequence[str] | None = None,
-    ) -> list[str]:
-        """
-        Monta consultas para as categorias nacionais disponíveis.
-
-        Quando nenhuma categoria é informada, utiliza todas.
-        """
-
+    def _normalize_categories(categories):
         if categories is None:
-            selected_categories = list(NATIONAL_SEARCHES)
+            return list(NATIONAL_SEARCHES)
 
-        else:
-            if isinstance(categories, (str, bytes)):
-                raise ValueError(
-                    "As categorias precisam ser fornecidas em uma lista."
-                )
+        if isinstance(categories, str):
+            raise ValueError("As categorias devem ser uma sequência.")
 
-            try:
-                selected_categories = list(categories)
-            except TypeError as exc:
-                raise ValueError(
-                    "Lista de categorias inválida."
-                ) from exc
+        try:
+            selected = list(categories)
+        except TypeError as exc:
+            raise ValueError(
+                "As categorias devem ser uma sequência."
+            ) from exc
 
-            if not selected_categories:
-                raise ValueError(
-                    "Informe pelo menos uma categoria de pesquisa."
-                )
+        normalized = []
 
-        queries = []
-        seen_categories = set()
-
-        for category in selected_categories:
+        for category in selected:
             if not isinstance(category, str):
-                raise ValueError(
-                    "Cada categoria precisa ser um texto."
-                )
+                raise ValueError("Categoria inválida.")
 
             category = category.strip().lower()
 
-            if not category:
-                raise ValueError(
-                    "Não são permitidas categorias vazias."
-                )
-
             if category not in NATIONAL_SEARCHES:
                 raise ValueError(
-                    f"Categoria de pesquisa não reconhecida: {category}."
+                    f"Categoria de pesquisa desconhecida: {category}"
                 )
 
-            if category in seen_categories:
-                continue
+            if category not in normalized:
+                normalized.append(category)
 
-            seen_categories.add(category)
-            queries.extend(NATIONAL_SEARCHES[category])
+        return normalized
 
-        if not queries:
-            raise ValueError(
-                "Nenhuma consulta de pesquisa foi gerada."
-            )
+    @staticmethod
+    def _build_query_items(
+        categories=None,
+        include_geography: bool = False,
+    ):
+        selected_categories = (
+            NationalDiscoveryCoordinator._normalize_categories(categories)
+        )
 
-        if len(queries) > MAX_NATIONAL_QUERIES:
-            raise ValueError(
-                "O número de consultas ultrapassou o limite permitido."
-            )
+        query_items = []
 
-        for query in queries:
-            if len(query) > MAX_QUERY_LENGTH:
-                raise ValueError(
-                    "Uma consulta ultrapassou o tamanho máximo permitido."
+        for category in selected_categories:
+            for query in NATIONAL_SEARCHES[category]:
+                query_items.append((category, query))
+
+        if include_geography:
+            for category, queries in REGIONAL_SEARCHES.items():
+                for query in queries:
+                    query_items.append((category, query))
+
+            for category, state_name in STATE_SEARCHES.items():
+                query = (
+                    "vagas de emprego empresas contratando agências de "
+                    f"emprego SINE fontes oficiais {state_name}"
                 )
+                query_items.append((category, query))
 
-        return queries
+        if len(query_items) > MAX_NATIONAL_QUERIES:
+            raise ValueError(
+                "O número de consultas ultrapassa o limite nacional."
+            )
+
+        for _, query in query_items:
+            if (
+                not isinstance(query, str)
+                or not query.strip()
+                or len(query) > MAX_QUERY_LENGTH
+            ):
+                raise ValueError("Consulta de pesquisa inválida.")
+
+        return query_items
+
+    @staticmethod
+    def build_national_queries(
+        categories=None,
+        include_geography: bool = False,
+    ):
+        query_items = NationalDiscoveryCoordinator._build_query_items(
+            categories=categories,
+            include_geography=include_geography,
+        )
+
+        return [query for _, query in query_items]
 
     def _run_queries(
         self,
         query_items: Sequence[tuple[str, str]],
         limit_per_query: int,
-    ) -> NationalDiscoveryReport:
-        """Executa consultas e preserva a origem de cada resultado."""
-
+    ):
         self._validate_limit(limit_per_query)
 
+        if len(query_items) > MAX_NATIONAL_QUERIES:
+            raise ValueError(
+                "O número de consultas ultrapassa o limite nacional."
+            )
+
         results = []
-        matches = []
         errors = []
+        matches = []
         seen_urls = set()
 
         for category, query in query_items:
             try:
-                search_results = self.search_engine.search(
+                found = self.search_engine.search(
                     query,
                     limit=limit_per_query,
                 )
+
+                for result in found:
+                    normalized_url = normalize_search_url(result.url)
+
+                    matches.append(
+                        DiscoveryMatch(
+                            category=category,
+                            query=query,
+                            normalized_url=normalized_url,
+                            result=result,
+                        )
+                    )
+
+                    if normalized_url in seen_urls:
+                        continue
+
+                    seen_urls.add(normalized_url)
+                    results.append(result)
 
             except SearchProviderError as exc:
                 errors.append(
@@ -205,25 +276,6 @@ class NationalDiscoveryCoordinator:
                         message=str(exc),
                     )
                 )
-                continue
-
-            for result in search_results:
-                normalized_url = normalize_search_url(result.url)
-
-                matches.append(
-                    DiscoveryMatch(
-                        category=category,
-                        query=query,
-                        normalized_url=normalized_url,
-                        result=result,
-                    )
-                )
-
-                if normalized_url in seen_urls:
-                    continue
-
-                seen_urls.add(normalized_url)
-                results.append(result)
 
         return NationalDiscoveryReport(
             queries=tuple(query for _, query in query_items),
@@ -234,38 +286,24 @@ class NationalDiscoveryCoordinator:
 
     def search_national(
         self,
-        categories: Sequence[str] | None = None,
+        categories=None,
         limit_per_query: int = 10,
-    ) -> NationalDiscoveryReport:
-        """
-        Executa pesquisas nacionais nas categorias selecionadas.
+        include_geography=None,
+    ):
+        self._validate_limit(limit_per_query)
 
-        Categorias disponíveis:
-        companies
-        agencies
-        temporary_work
-        headhunters
-        ats
-        regional_public_sources
-        """
+        if include_geography is None:
+            include_geography = categories is None
 
-        queries = self.build_national_queries(categories)
-
-        if categories is None:
-            selected_categories = list(NATIONAL_SEARCHES)
-        else:
-            selected_categories = list(
-                dict.fromkeys(
-                    category.strip().lower()
-                    for category in categories
-                )
+        if not isinstance(include_geography, bool):
+            raise ValueError(
+                "include_geography deve ser verdadeiro ou falso."
             )
 
-        query_items = [
-            (category, query)
-            for category in selected_categories
-            for query in NATIONAL_SEARCHES[category]
-        ]
+        query_items = self._build_query_items(
+            categories=categories,
+            include_geography=include_geography,
+        )
 
         return self._run_queries(
             query_items,
@@ -276,8 +314,8 @@ class NationalDiscoveryCoordinator:
         self,
         company_name: str,
         limit_per_query: int = 10,
-    ) -> NationalDiscoveryReport:
-        """Pesquisa páginas e oportunidades relacionadas a uma empresa."""
+    ):
+        self._validate_limit(limit_per_query)
 
         queries = build_company_queries(company_name)
 
@@ -295,16 +333,8 @@ class NationalDiscoveryCoordinator:
     def inspect_official_site(
         company_name: str,
         official_site_url: str,
-    ) -> list[CareerPageCandidate]:
-        """
-        Examina um site oficial conhecido e procura páginas de carreira.
-
-        A URL recebida é tratada como candidata: a pesquisa não comprova,
-        por si só, que o domínio pertence à empresa.
-        """
-
+    ) -> Sequence[CareerPageCandidate]:
         return discover_career_pages(
             company_name,
             official_site_url,
         )
-        
