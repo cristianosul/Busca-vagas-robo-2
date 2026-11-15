@@ -304,7 +304,10 @@ def test_recovery_does_not_reset_completed_municipalities(scheduler_db):
 
     scheduler_db.claim_next_municipality(0)
 
-    recovered = scheduler_db.recover_interrupted_municipalities(0)
+    recovered = scheduler_db.recover_interrupted_municipalities(
+    0,
+    stale_after_seconds=0,
+    )
 
     assert recovered == 1
 
