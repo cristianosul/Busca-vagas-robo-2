@@ -1,8 +1,16 @@
 
+from datetime import datetime, timezone
+
 import pytest
 
 import app.repository as repository
-from app.models import CandidateEvidence, CandidateIn, SourceCreate
+from app.models import (
+    CandidateEvidence,
+    CandidateIn,
+    EvidenceRecord,
+    SourceCreate,
+)
+
 
 
 @pytest.fixture
@@ -38,6 +46,36 @@ def make_source(source_id="empresa-teste"):
         authorization="official_public_page",
         enabled=False,
         notes="Fonte fictícia para testes",
+    )
+
+
+def make_complete_evidence():
+    criteria = (
+        "company_verified",
+        "original_page_verified",
+        "application_link_verified",
+        "job_content_verified",
+        "date_verified",
+    )
+
+    records = [
+        EvidenceRecord(
+            criterion=criterion,
+            evidence_url="https://example.com/evidence",
+            method="manual_review",
+            checked_at=datetime.now(timezone.utc),
+            result="verified",
+        )
+        for criterion in criteria
+    ]
+
+    return CandidateEvidence(
+        company_verified=True,
+        original_page_verified=True,
+        application_link_verified=True,
+        job_content_verified=True,
+        date_verified=True,
+        evidence_records=records,
     )
 
 
