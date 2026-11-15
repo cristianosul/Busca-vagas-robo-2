@@ -24,6 +24,7 @@ jobs:
 
       - name: Testar cadastro de fontes no Neon
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
         run: |
           python test_source_registry_neon.py
+          
