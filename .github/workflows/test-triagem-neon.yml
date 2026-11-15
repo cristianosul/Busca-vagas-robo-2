@@ -1,19 +1,22 @@
-
 name: Testar triagem do Robo 2 no Neon
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test-triage:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
 
     steps:
       - name: Baixar repositorio
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Configurar Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -22,8 +25,14 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Executar teste de triagem
+      - name: Executar teste de triagem no Neon
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
         run: |
-          python test_neon.py
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::Configure o segredo NEON_DATABASE_URL nas configuracoes do GitHub."
+            exit 1
+          fi
+
+          python test_triagem_neon.py
+          
