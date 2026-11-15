@@ -294,3 +294,134 @@ def test_inspect_official_site_delegates_to_company_discovery(
         "official_site_url": "https://empresa.example",
     }
     
+
+def test_search_national_records_category_and_query(fake_engine_class):
+    query = national_discovery.NATIONAL_SEARCHES["companies"][0]
+
+    result = make_result(
+        "https://empresa.example/carreiras?utm_source=google"
+    )
+
+    engine = fake_engine_class({
+        query: [result],
+    })
+
+    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
+
+    report = coordinator.search_national(
+        categories=["companies"],
+    )
+
+    assert len(report.matches) == 1
+
+    match = report.matches[0]
+
+    assert match.category == "companies"
+    assert match.query == query
+    assert match.normalized_url == "https://empresa.example/carreiras"
+    assert match.result == result
+
+
+def test_search_national_preserves_duplicate_origins(fake_engine_class):
+    queries = national_discovery.NATIONAL_SEARCHES["companies"]
+
+    first_result = make_result(
+        "https://empresa.example/vagas?utm_source=google"
+    )
+
+    second_result = make_result(
+        "https://empresa.example/vagas"
+    )
+
+    engine = fake_engine_class({
+        queries[0]: [first_result],
+        queries[1]: [second_result],
+    })
+
+    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
+
+    report = coordinator.search_national(
+        categories=["companies"],
+    )
+
+    # A lista principal continua eliminando duplicidades.
+    assert len(report.results) == 1
+
+    # O histórico preserva as duas descobertas.
+    assert len(report.matches) == 2
+
+    assert report.matches[0].category == "companies"
+    assert report.matches[0].query == queries[0]
+
+    assert report.matches[1].category == "companies"
+    assert report.matches[1].query == queries[1]
+
+    assert (
+        report.matches[0].normalized_url
+        == report.matches[1].normalized_url
+    )
+
+
+def test_search_company_records_company_category(
+    fake_engine_class,
+    monkeypatch,
+):
+    company_queries = [
+        "Empresa Exemplo carreiras",
+        "Empresa Exemplo vagas",
+    ]
+
+    result = make_result(
+        "https://empresa.example/trabalhe-conosco"
+    )
+
+    monkeypatch.setattr(
+        national_discovery,
+        "build_company_queries",
+        lambda company_name: company_queries,
+    )
+
+    engine = fake_engine_class({
+        company_queries[0]: [result],
+    })
+
+    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
+
+    report = coordinator.search_company("Empresa Exemplo")
+
+    assert len(report.matches) == 1
+
+    match = report.matches[0]
+
+    assert match.category == "company"
+    assert match.query == company_queries[0]
+    assert match.normalized_url == (
+        "https://empresa.example/trabalhe-conosco"
+    )
+    assert match.result == result
+
+
+def test_national_report_preserves_results_compatibility(
+    fake_engine_class,
+):
+    query = national_discovery.NATIONAL_SEARCHES["companies"][0]
+
+    result = make_result(
+        "https://empresa.example/vagas"
+    )
+
+    engine = fake_engine_class({
+        query: [result],
+    })
+
+    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
+
+    report = coordinator.search_national(
+        categories=["companies"],
+    )
+
+    assert report.results == (result,)
+    assert isinstance(report.results, tuple)
+    assert isinstance(report.matches, tuple)
+    assert report.matches[0].result is result
+    
