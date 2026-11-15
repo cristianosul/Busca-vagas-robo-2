@@ -905,7 +905,7 @@ def test_failed_municipality_cannot_be_completed_without_retry(
         claimed["lease_token"],
     )
 
-    with pytest.raises(ValueError, match="não está em execução"):
+   with pytest.raises(ValueError, match="Reserva não encontrada"): 
         scheduler_db.mark_municipality_completed(
             "4305108",
             claimed["lease_token"],
