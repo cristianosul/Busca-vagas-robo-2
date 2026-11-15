@@ -1,4 +1,5 @@
 
+import secrets
 from datetime import datetime, timedelta, timezone
 
 from app.repository import DATABASE_URL, db_session, execute
@@ -17,6 +18,24 @@ def _validate_batch_index(batch_index: int) -> int:
         raise ValueError("O índice do lote deve ser um inteiro não negativo.")
 
     return batch_index
+
+
+def _validate_municipality_code(municipality_code: str) -> str:
+    code = str(municipality_code).strip()
+
+    if len(code) != 7 or not code.isdigit():
+        raise ValueError("Código IBGE inválido.")
+
+    return code
+
+
+def _validate_lease_token(lease_token: str) -> str:
+    token = str(lease_token).strip()
+
+    if not token:
+        raise ValueError("Token de execução inválido.")
+
+    return token
 
 
 def _municipality_data(municipality):
@@ -45,6 +64,36 @@ def _municipality_data(municipality):
     return code, name, state
 
 
+def _ensure_lease_token_column(conn):
+    """
+    Adiciona lease_token a bancos existentes sem perder dados.
+    """
+    if DATABASE_URL:
+        execute(
+            conn,
+            """
+            ALTER TABLE municipality_discovery
+            ADD COLUMN IF NOT EXISTS lease_token TEXT
+            """,
+        )
+        return
+
+    columns = {
+        row["name"]
+        for row in conn.execute(
+            "PRAGMA table_info(municipality_discovery)"
+        ).fetchall()
+    }
+
+    if "lease_token" not in columns:
+        conn.execute(
+            """
+            ALTER TABLE municipality_discovery
+            ADD COLUMN lease_token TEXT
+            """
+        )
+
+
 def init_municipality_scheduler():
     """Cria as tabelas próprias do controle de lotes municipais."""
     with db_session() as conn:
@@ -63,9 +112,12 @@ def init_municipality_scheduler():
                 started_at TEXT,
                 completed_at TEXT,
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                lease_token TEXT
             )
         """)
+
+        _ensure_lease_token_column(conn)
 
         conn.execute("""
             CREATE INDEX IF NOT EXISTS
@@ -203,7 +255,10 @@ def get_batch_progress(batch_index: int):
     }
 
 
-def list_batch_municipalities(batch_index: int, status: str | None = None):
+def list_batch_municipalities(
+    batch_index: int,
+    status: str | None = None,
+):
     """Lista municípios de um lote, opcionalmente filtrados por estado."""
     batch_index = _validate_batch_index(batch_index)
 
@@ -245,6 +300,8 @@ def claim_next_municipality(batch_index: int):
 
     PostgreSQL utiliza FOR UPDATE SKIP LOCKED.
     SQLite utiliza BEGIN IMMEDIATE.
+
+    Cada reserva recebe um token exclusivo.
     """
     batch_index = _validate_batch_index(batch_index)
     is_postgres = bool(DATABASE_URL)
@@ -282,6 +339,7 @@ def claim_next_municipality(batch_index: int):
             return None
 
         now = utc_now()
+        lease_token = secrets.token_urlsafe(32)
 
         claimed = execute(
             conn,
@@ -292,7 +350,8 @@ def claim_next_municipality(batch_index: int):
                 error = NULL,
                 started_at = ?,
                 completed_at = NULL,
-                updated_at = ?
+                updated_at = ?,
+                lease_token = ?
             WHERE municipality_code = ?
               AND batch_index = ?
               AND status = 'pending'
@@ -301,6 +360,7 @@ def claim_next_municipality(batch_index: int):
             (
                 now,
                 now,
+                lease_token,
                 row["municipality_code"],
                 batch_index,
             ),
@@ -309,17 +369,18 @@ def claim_next_municipality(batch_index: int):
         return dict(claimed) if claimed else None
 
 
-def heartbeat_municipality(municipality_code: str):
+def heartbeat_municipality(
+    municipality_code: str,
+    lease_token: str,
+):
     """
     Renova a atividade de um município em execução.
 
-    Atualiza updated_at sem reiniciar a contagem de tentativas.
+    Somente o trabalhador que possui o token atual pode renovar
+    a reserva.
     """
-    code = str(municipality_code).strip()
-
-    if len(code) != 7 or not code.isdigit():
-        raise ValueError("Código IBGE inválido.")
-
+    code = _validate_municipality_code(municipality_code)
+    token = _validate_lease_token(lease_token)
     now = utc_now()
 
     with db_session(immediate=True) as conn:
@@ -330,26 +391,29 @@ def heartbeat_municipality(municipality_code: str):
             SET updated_at = ?
             WHERE municipality_code = ?
               AND status = 'running'
+              AND lease_token = ?
             RETURNING *
             """,
-            (now, code),
+            (now, code, token),
         ).fetchone()
 
     if not row:
         raise ValueError(
-            "Município não encontrado ou não está em execução."
+            "Reserva não encontrada, expirada ou token inválido."
         )
 
     return dict(row)
 
 
-def mark_municipality_completed(municipality_code: str):
-    """Marca como concluído um município que estava em execução."""
-    code = str(municipality_code).strip()
-
-    if len(code) != 7 or not code.isdigit():
-        raise ValueError("Código IBGE inválido.")
-
+def mark_municipality_completed(
+    municipality_code: str,
+    lease_token: str,
+):
+    """
+    Marca como concluído somente se o token corresponder à reserva atual.
+    """
+    code = _validate_municipality_code(municipality_code)
+    token = _validate_lease_token(lease_token)
     now = utc_now()
 
     with db_session(immediate=True) as conn:
@@ -360,17 +424,19 @@ def mark_municipality_completed(municipality_code: str):
             SET status = 'completed',
                 error = NULL,
                 completed_at = ?,
-                updated_at = ?
+                updated_at = ?,
+                lease_token = NULL
             WHERE municipality_code = ?
               AND status = 'running'
+              AND lease_token = ?
             RETURNING *
             """,
-            (now, now, code),
+            (now, now, code, token),
         ).fetchone()
 
     if not row:
         raise ValueError(
-            "Município não encontrado ou não estava em execução."
+            "Reserva não encontrada ou token de execução inválido."
         )
 
     return dict(row)
@@ -379,13 +445,14 @@ def mark_municipality_completed(municipality_code: str):
 def mark_municipality_failed(
     municipality_code: str,
     error: str,
+    lease_token: str,
 ):
-    """Registra falha sem perder o histórico de tentativas."""
-    code = str(municipality_code).strip()
+    """
+    Registra falha somente se o token corresponder à reserva atual.
+    """
+    code = _validate_municipality_code(municipality_code)
+    token = _validate_lease_token(lease_token)
     message = str(error).strip()[:2000]
-
-    if len(code) != 7 or not code.isdigit():
-        raise ValueError("Código IBGE inválido.")
 
     if not message:
         message = "Falha sem descrição."
@@ -400,17 +467,19 @@ def mark_municipality_failed(
             SET status = 'failed',
                 error = ?,
                 completed_at = NULL,
-                updated_at = ?
+                updated_at = ?,
+                lease_token = NULL
             WHERE municipality_code = ?
               AND status = 'running'
+              AND lease_token = ?
             RETURNING *
             """,
-            (message, now, code),
+            (message, now, code, token),
         ).fetchone()
 
     if not row:
         raise ValueError(
-            "Município não encontrado ou não estava em execução."
+            "Reserva não encontrada ou token de execução inválido."
         )
 
     return dict(row)
@@ -426,10 +495,7 @@ def retry_failed_municipality(
     Preserva o histórico de tentativas e impede novas tentativas
     quando o limite configurado já foi atingido.
     """
-    code = str(municipality_code).strip()
-
-    if len(code) != 7 or not code.isdigit():
-        raise ValueError("Código IBGE inválido.")
+    code = _validate_municipality_code(municipality_code)
 
     if (
         isinstance(max_attempts, bool)
@@ -451,7 +517,8 @@ def retry_failed_municipality(
                 error = NULL,
                 started_at = NULL,
                 completed_at = NULL,
-                updated_at = ?
+                updated_at = ?,
+                lease_token = NULL
             WHERE municipality_code = ?
               AND status = 'failed'
               AND attempts < ?
@@ -474,10 +541,10 @@ def recover_interrupted_municipalities(
     stale_after_seconds: int = 3600,
 ):
     """
-    Recupera somente municípios sem atividade recente.
+    Recupera municípios sem atividade recente.
 
     O prazo considera updated_at, permitindo que o heartbeat
-    renove a reserva sem alterar started_at.
+    renove a reserva. O token anterior é invalidado na recuperação.
     """
     if batch_index is not None:
         batch_index = _validate_batch_index(batch_index)
@@ -507,7 +574,8 @@ def recover_interrupted_municipalities(
                 SET status = 'pending',
                     error = 'Execução interrompida; aguardando retomada.',
                     started_at = NULL,
-                    updated_at = ?
+                    updated_at = ?,
+                    lease_token = NULL
                 WHERE status = 'running'
                   AND updated_at < ?
                 """,
@@ -521,7 +589,8 @@ def recover_interrupted_municipalities(
                 SET status = 'pending',
                     error = 'Execução interrompida; aguardando retomada.',
                     started_at = NULL,
-                    updated_at = ?
+                    updated_at = ?,
+                    lease_token = NULL
                 WHERE status = 'running'
                   AND batch_index = ?
                   AND updated_at < ?
@@ -530,4 +599,3 @@ def recover_interrupted_municipalities(
             )
 
         return cursor.rowcount
-        
