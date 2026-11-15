@@ -4,16 +4,20 @@ name: Testar conexão Neon
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test-database:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
 
     steps:
       - name: Baixar repositório
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Configurar Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -24,7 +28,13 @@ jobs:
 
       - name: Testar conexão e inicializar banco
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.NEON_DATABASE_URL }}
         run: |
+          if [ -z "$DATABASE_URL" ]; then
+            echo "::error::Configure o segredo NEON_DATABASE_URL nas configurações do GitHub."
+            exit 1
+          fi
+
           python -c "from app.repository import init_db; init_db(); print('CONEXAO NEON OK')"
           python -m tests.test_neon
+          
