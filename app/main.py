@@ -13,6 +13,8 @@ from app.models import (
 )
 from app.repository import (
     init_db,
+    connect,
+    execute,
     save_candidate,
     list_candidates,
     save_source,
@@ -31,7 +33,7 @@ logger = logging.getLogger("busca-vagas-robo-2")
 
 
 def require_source_admin(token: str | None):
-    """Protege o gerenciamento de fontes e pesquisas."""
+    """Protege o gerenciamento de fontes, candidatos e pesquisas."""
 
     expected_token = os.getenv("SOURCE_ADMIN_TOKEN", "").strip()
 
@@ -77,11 +79,50 @@ app = FastAPI(
 
 @app.get("/health")
 def health():
+    """Verifica se o processo da API está ativo."""
+
     return {
         "status": "ok",
         "service": "busca-vagas-robo-2",
         "publishing_enabled": False,
     }
+
+
+@app.get("/ready")
+def readiness():
+    """Verifica se a API consegue acessar o banco de dados."""
+
+    conn = None
+
+    try:
+        conn = connect()
+        execute(conn, "SELECT 1").fetchone()
+
+        return {
+            "status": "ready",
+            "database": "ok",
+            "publishing_enabled": False,
+        }
+
+    except Exception:
+        logger.exception("Verificação de disponibilidade do banco falhou")
+
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "status": "not_ready",
+                "database": "unavailable",
+            },
+        )
+
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                logger.exception(
+                    "Erro ao fechar conexão da verificação de disponibilidade"
+                )
 
 
 @app.post("/api/candidates")
@@ -92,6 +133,8 @@ def create_candidate(
         alias="X-Admin-Token",
     ),
 ):
+    """Registra uma oportunidade sem permitir aprovação automática indevida."""
+
     require_source_admin(x_admin_token)
 
     try:
@@ -105,6 +148,7 @@ def create_candidate(
 
     except Exception:
         logger.exception("Erro ao registrar oportunidade")
+
         raise HTTPException(
             status_code=500,
             detail="Não foi possível registrar a oportunidade.",
@@ -126,10 +170,14 @@ def get_candidates(
     require_source_admin(x_admin_token)
 
     try:
-        return list_candidates(status=status, limit=limit)
+        return list_candidates(
+            status=status,
+            limit=limit,
+        )
 
     except Exception:
         logger.exception("Erro ao consultar oportunidades")
+
         raise HTTPException(
             status_code=500,
             detail="Não foi possível consultar as oportunidades.",
@@ -157,18 +205,26 @@ def discover_web_results(
 
     require_source_admin(x_admin_token)
 
+    normalized_query = " ".join(query.split())
+
+    if len(normalized_query) < 3:
+        raise HTTPException(
+            status_code=422,
+            detail="A consulta deve conter pelo menos 3 caracteres úteis.",
+        )
+
     try:
         engine = SearchEngine(
             providers=[TavilySearchProvider()]
         )
 
         results = engine.search(
-            query=query,
+            query=normalized_query,
             limit=limit,
         )
 
         return {
-            "query": " ".join(query.split()),
+            "query": normalized_query,
             "provider": "tavily",
             "total": len(results),
             "results": [
@@ -209,6 +265,7 @@ def discover_web_results(
 
     except Exception:
         logger.exception("Erro inesperado na pesquisa web")
+
         raise HTTPException(
             status_code=500,
             detail="Não foi possível realizar a pesquisa.",
@@ -245,6 +302,7 @@ def create_source(
 
     except Exception:
         logger.exception("Erro ao cadastrar fonte")
+
         raise HTTPException(
             status_code=500,
             detail="Não foi possível cadastrar a fonte.",
@@ -270,6 +328,7 @@ def get_sources(
 
     except Exception:
         logger.exception("Erro ao consultar fontes")
+
         raise HTTPException(
             status_code=500,
             detail="Não foi possível consultar as fontes.",
@@ -302,6 +361,7 @@ def get_source(
 
     except Exception:
         logger.exception("Erro ao consultar fonte")
+
         raise HTTPException(
             status_code=500,
             detail="Não foi possível consultar a fonte.",
@@ -355,6 +415,7 @@ def change_source_status(
 
     except Exception:
         logger.exception("Erro ao atualizar fonte")
+
         raise HTTPException(
             status_code=500,
             detail="Não foi possível atualizar a fonte.",
