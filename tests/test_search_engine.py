@@ -540,7 +540,7 @@ def test_search_engine_continues_after_provider_failure():
 
     assert len(results) == 1
     assert results[0].title == "Vaga encontrada"
-    assert working.queries == [("vagas Python", 50)]
+    assert working.queries == [("vagas Python", 10)]
 
 
 def test_search_engine_raises_when_all_providers_fail():
