@@ -93,7 +93,36 @@ def test_rejection_has_priority_over_complete_evidence():
     score, status, reasons = score_candidate(evidence)
 
     assert score == 100
-    assert status != "approved"
     assert status == "rejected"
     assert any("fraudulenta" in reason for reason in reasons)
-    
+
+
+def test_all_incomplete_evidence_combinations_require_review():
+    fields = list(ALL_EVIDENCE)
+
+    for mask in range(1, 2 ** len(fields)):
+        data = {
+            field: bool(mask & (1 << index))
+            for index, field in enumerate(fields)
+        }
+
+        if all(data.values()):
+            continue
+
+        evidence = CandidateEvidence(**data)
+
+        score, status, reasons = score_candidate(evidence)
+
+        assert status == "review"
+        assert score < 100
+        assert any("Em revisão" in reason for reason in reasons)
+
+
+def test_maximum_score_is_exactly_100():
+    evidence = CandidateEvidence(**ALL_EVIDENCE)
+
+    score, status, reasons = score_candidate(evidence)
+
+    assert score == sum([25, 25, 20, 15, 15])
+    assert score == 100
+    assert status == "approved"
