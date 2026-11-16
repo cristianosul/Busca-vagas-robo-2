@@ -910,3 +910,74 @@ def test_failed_municipality_cannot_be_completed_without_retry(
             "4305108",
             claimed["lease_token"],
         )
+
+
+def test_recovery_does_not_exceed_three_attempts(scheduler_db):
+    scheduler_db.register_municipality_batch(
+        0,
+        [municipality("4305108", "Caxias do Sul")],
+    )
+
+    claimed = claim(scheduler_db)
+
+    with scheduler_db.db_session(immediate=True) as conn:
+        conn.execute(
+            """
+            UPDATE municipality_discovery
+            SET attempts = 3,
+                updated_at = '2000-01-01T00:00:00+00:00'
+            WHERE municipality_code = ?
+            """,
+            (claimed["municipality_code"],),
+        )
+
+    recovered = scheduler_db.recover_interrupted_municipalities(
+        0,
+        stale_after_seconds=3600,
+    )
+
+    assert recovered == 1
+
+    municipality_record = scheduler_db.list_batch_municipalities(
+        0,
+    )[0]
+
+    assert municipality_record["status"] == "failed"
+    assert municipality_record["attempts"] == 3
+    assert municipality_record["lease_token"] is None
+    assert municipality_record["error"]
+    assert scheduler_db.get_batch_progress(0)["pending"] == 0
+
+
+def test_heartbeat_rejects_none_token(scheduler_db):
+    scheduler_db.register_municipality_batch(
+        0,
+        [municipality("4305108", "Caxias do Sul")],
+    )
+
+    claimed = claim(scheduler_db)
+
+    with pytest.raises(
+        ValueError,
+        match="Token de execução inválido",
+    ):
+        scheduler_db.heartbeat_municipality(
+            claimed["municipality_code"],
+            None,
+        )
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["1!", "R1", "1S", "RS1"],
+)
+def test_register_batch_rejects_invalid_state_characters(
+    scheduler_db,
+    state,
+):
+    with pytest.raises(ValueError, match="inválidos"):
+        scheduler_db.register_municipality_batch(
+            0,
+            [municipality("4305108", state=state)],
+        )
+        
