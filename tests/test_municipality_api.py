@@ -178,11 +178,11 @@ def test_register_municipality_batch_registers_at_most_60(
         captured["batch_index"] = batch_index
         captured["municipalities"] = municipalities
 
-    return {
-        "batch_index": batch_index,
-        "total": len(municipalities),
-        "pending": len(municipalities),
-    }
+        return {
+            "batch_index": batch_index,
+            "total": len(municipalities),
+            "pending": len(municipalities),
+        }
 
     monkeypatch.setattr(
         main,
