@@ -1152,3 +1152,125 @@ def test_search_municipality_preserves_origins_and_deduplicates(
         for match in report.matches
     )
     
+
+
+# ============================================================
+# Cobertura nacional explícita: regiões e unidades federativas
+# ============================================================
+
+
+def test_geographic_catalog_covers_all_27_federative_units():
+    expected = {
+        "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO",
+        "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI",
+        "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO",
+    }
+
+    actual = {
+        category.removeprefix("state:")
+        for category in national_discovery.STATE_SEARCHES
+    }
+
+    assert actual == expected
+    assert national_discovery.BRAZILIAN_STATE_CODES == expected
+
+
+def test_geographic_catalog_covers_all_five_regions_without_gaps_or_overlap():
+    expected_regions = {
+        "region:norte",
+        "region:nordeste",
+        "region:centro-oeste",
+        "region:sudeste",
+        "region:sul",
+    }
+
+    assert set(national_discovery.REGIONAL_SEARCHES) == expected_regions
+    assert set(national_discovery.REGION_STATES) == expected_regions
+
+    all_states = []
+    for states in national_discovery.REGION_STATES.values():
+        all_states.extend(states)
+
+    assert len(all_states) == 27
+    assert len(set(all_states)) == 27
+    assert set(all_states) == national_discovery.BRAZILIAN_STATE_CODES
+
+
+def test_geographic_queries_stay_within_national_query_limit():
+    queries = national_discovery.NationalDiscoveryCoordinator.build_national_queries(
+        include_geography=True,
+    )
+
+    assert len(queries) <= national_discovery.MAX_NATIONAL_QUERIES
+    assert len(queries) == len(set(queries))
+
+
+def test_ibge_catalog_rejects_unknown_state_code(monkeypatch):
+    national_discovery.load_brazilian_municipalities.cache_clear()
+    monkeypatch.setattr(
+        national_discovery.httpx,
+        "get",
+        lambda *args, **kwargs: SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: [make_ibge_municipality(9999999, "Cidade Teste", "XX")],
+        ),
+    )
+
+    with pytest.raises(
+        national_discovery.MunicipalityCatalogError,
+        match="dados municipais incompletos",
+    ):
+        national_discovery.load_brazilian_municipalities()
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+
+def test_ibge_catalog_rejects_non_seven_digit_code(monkeypatch):
+    national_discovery.load_brazilian_municipalities.cache_clear()
+    monkeypatch.setattr(
+        national_discovery.httpx,
+        "get",
+        lambda *args, **kwargs: SimpleNamespace(
+            raise_for_status=lambda: None,
+            json=lambda: [make_ibge_municipality(123, "Cidade Teste", "RS")],
+        ),
+    )
+
+    with pytest.raises(
+        national_discovery.MunicipalityCatalogError,
+        match="dados municipais incompletos",
+    ):
+        national_discovery.load_brazilian_municipalities()
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+
+def test_national_geographic_queries_include_every_state_name():
+    query_items = national_discovery.NationalDiscoveryCoordinator._build_query_items(
+        include_geography=True,
+    )
+
+    state_items = {
+        category: query
+        for category, query in query_items
+        if category.startswith("state:")
+    }
+
+    assert set(state_items) == set(national_discovery.STATE_SEARCHES)
+
+    for category, state_name in national_discovery.STATE_SEARCHES.items():
+        assert state_name in state_items[category]
+
+
+def test_national_geographic_queries_include_each_region():
+    query_items = national_discovery.NationalDiscoveryCoordinator._build_query_items(
+        include_geography=True,
+    )
+
+    region_categories = {
+        category
+        for category, _ in query_items
+        if category.startswith("region:")
+    }
+
+    assert region_categories == set(national_discovery.REGIONAL_SEARCHES)
