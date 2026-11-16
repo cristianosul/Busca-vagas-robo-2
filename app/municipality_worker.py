@@ -25,6 +25,7 @@ from app.municipality_scheduler import (
     mark_municipality_completed,
     mark_municipality_failed,
     recover_interrupted_municipalities,
+    retry_failed_municipality,
 )
 from app.national_discovery import NationalDiscoveryCoordinator
 from app.repository import (
@@ -93,6 +94,7 @@ def _heartbeat_loop(
             )
         except Exception as exc:
             heartbeat_errors.append(str(exc))
+
             logger.exception(
                 "Falha no heartbeat do município %s.",
                 municipality_code,
@@ -126,9 +128,22 @@ def _start_heartbeat(
     return stop_event, thread, heartbeat_errors
 
 
-def _stop_heartbeat(stop_event, thread):
+def _stop_heartbeat(
+    stop_event: threading.Event | None,
+    thread: threading.Thread | None,
+):
+    """
+    Solicita a parada e aguarda o encerramento completo da thread.
+
+    Não permite que um heartbeat continue executando depois
+    da conclusão ou da falha do município.
+    """
+
+    if stop_event is None or thread is None:
+        return
+
     stop_event.set()
-    thread.join(timeout=5)
+    thread.join()
 
 
 def _municipality_payload(claimed: dict) -> dict:
@@ -136,6 +151,11 @@ def _municipality_payload(claimed: dict) -> dict:
     Adapta os nomes retornados pelo scheduler ao contrato
     de search_municipality().
     """
+
+    if not isinstance(claimed, dict):
+        raise ValueError(
+            "O scheduler retornou uma reserva inválida."
+        )
 
     code = claimed.get("municipality_code")
     name = claimed.get("municipality_name")
@@ -207,12 +227,18 @@ def _save_report(
                 "A pesquisa retornou um resultado sem conteúdo."
             )
 
-        if not isinstance(category, str) or not category.strip():
+        if (
+            not isinstance(category, str)
+            or not category.strip()
+        ):
             raise ValueError(
                 "Resultado sem categoria de pesquisa."
             )
 
-        if not isinstance(query, str) or not query.strip():
+        if (
+            not isinstance(query, str)
+            or not query.strip()
+        ):
             raise ValueError(
                 "Resultado sem consulta de origem."
             )
@@ -240,6 +266,64 @@ def _save_report(
     return saved
 
 
+def _report_errors(report: Any) -> list[str]:
+    """Converte os erros do relatório em mensagens legíveis."""
+
+    errors = getattr(report, "errors", ())
+
+    if not errors:
+        return []
+
+    messages = []
+
+    for error in errors:
+        message = getattr(error, "message", error)
+        messages.append(str(message))
+
+    return messages
+
+
+def _record_failure(
+    municipality_code: str,
+    message: str,
+    lease_token: str,
+) -> bool:
+    """
+    Registra a falha e agenda nova tentativa quando permitido.
+
+    Retorna True quando o município foi devolvido para pending.
+    """
+
+    mark_municipality_failed(
+        municipality_code,
+        message,
+        lease_token,
+    )
+
+    try:
+        retry_failed_municipality(
+            municipality_code,
+            max_attempts=MAX_MUNICIPALITY_ATTEMPTS,
+        )
+
+        logger.info(
+            "Município %s devolvido para nova tentativa.",
+            municipality_code,
+        )
+
+        return True
+
+    except ValueError:
+        logger.warning(
+            "Município %s não será reenfileirado: "
+            "limite de %s tentativas atingido ou estado incompatível.",
+            municipality_code,
+            MAX_MUNICIPALITY_ATTEMPTS,
+        )
+
+        return False
+
+
 def run_worker(
     coordinator: NationalDiscoveryCoordinator,
     *,
@@ -250,18 +334,20 @@ def run_worker(
     stale_after_seconds: int = DEFAULT_STALE_AFTER_SECONDS,
 ) -> dict:
     """
-    Executa uma quantidade limitada de municípios de um lote.
+    Executa uma quantidade limitada de tentativas de pesquisa.
 
     O coordenador é recebido por parâmetro para permitir testes
     isolados sem chamadas reais aos provedores de pesquisa.
+
+    max_municipalities limita o número de tentativas nesta execução,
+    não o número de municípios únicos.
     """
 
-    if not isinstance(
-        coordinator,
-        NationalDiscoveryCoordinator,
+    if not callable(
+        getattr(coordinator, "search_municipality", None)
     ):
         raise ValueError(
-            "Um NationalDiscoveryCoordinator válido é obrigatório."
+            "O coordenador deve fornecer search_municipality()."
         )
 
     batch_index = _validate_batch_index(batch_index)
@@ -301,12 +387,13 @@ def run_worker(
         "processed": 0,
         "completed": 0,
         "failed": 0,
+        "retried": 0,
         "results_saved": 0,
         "errors": [],
     }
 
     logger.info(
-        "Iniciando worker no lote %s; limite de municípios: %s.",
+        "Iniciando worker no lote %s; limite de tentativas: %s.",
         batch_index,
         max_municipalities,
     )
@@ -326,20 +413,30 @@ def run_worker(
             )
             break
 
-        municipality = _municipality_payload(claimed)
-        municipality_code = municipality["code"]
-        lease_token = claimed.get("lease_token")
-
-        if not isinstance(lease_token, str) or not lease_token.strip():
-            raise RuntimeError(
-                "O scheduler não forneceu um lease_token válido."
-            )
+        municipality = None
+        municipality_code = None
+        lease_token = None
 
         stop_event = None
         heartbeat_thread = None
         heartbeat_errors = []
 
         try:
+            municipality = _municipality_payload(claimed)
+            municipality_code = municipality["code"]
+
+            lease_token = claimed.get("lease_token")
+
+            if (
+                not isinstance(lease_token, str)
+                or not lease_token.strip()
+            ):
+                raise RuntimeError(
+                    "O scheduler não forneceu um lease_token válido."
+                )
+
+            lease_token = lease_token.strip()
+
             # Confirma a propriedade da reserva antes da pesquisa.
             heartbeat_municipality(
                 municipality_code,
@@ -374,6 +471,8 @@ def run_worker(
                     + heartbeat_errors[-1]
                 )
 
+            # Salva resultados parciais mesmo quando alguma
+            # consulta do relatório tiver falhado.
             saved = _save_report(
                 municipality,
                 report,
@@ -381,28 +480,34 @@ def run_worker(
 
             stats["results_saved"] += saved
 
-            report_errors = getattr(report, "errors", ())
+            report_errors = _report_errors(report)
 
             if report_errors:
-                messages = [
-                    str(getattr(error, "message", error))
-                    for error in report_errors
-                ]
-
                 raise RuntimeError(
                     "A pesquisa municipal apresentou falhas: "
-                    + "; ".join(messages)
+                    + "; ".join(report_errors)
                 )
 
-            # Confirma que a reserva ainda pertence a este worker.
+            # Para e aguarda a thread antes da confirmação final.
+            _stop_heartbeat(
+                stop_event,
+                heartbeat_thread,
+            )
+
+            stop_event = None
+            heartbeat_thread = None
+
+            if heartbeat_errors:
+                raise RuntimeError(
+                    "A reserva do município foi perdida: "
+                    + heartbeat_errors[-1]
+                )
+
+            # Confirma novamente a propriedade da reserva.
             heartbeat_municipality(
                 municipality_code,
                 lease_token,
             )
-
-            _stop_heartbeat(stop_event, heartbeat_thread)
-            stop_event = None
-            heartbeat_thread = None
 
             mark_municipality_completed(
                 municipality_code,
@@ -412,7 +517,8 @@ def run_worker(
             stats["completed"] += 1
 
             logger.info(
-                "Município concluído: %s/%s. Resultados salvos: %s.",
+                "Município concluído: %s/%s. "
+                "Resultados salvos: %s.",
                 municipality["name"],
                 municipality["state"],
                 saved,
@@ -422,47 +528,72 @@ def run_worker(
             message = str(exc)[:2000]
 
             logger.exception(
-                "Falha no município %s.",
-                municipality_code,
+                "Falha na tentativa de pesquisa municipal."
             )
 
             stats["failed"] += 1
+
             stats["errors"].append({
                 "municipality_code": municipality_code,
-                "municipality_name": municipality["name"],
+                "municipality_name": (
+                    municipality["name"]
+                    if municipality is not None
+                    else None
+                ),
                 "error": message,
             })
 
-            if not heartbeat_errors:
+            # Interrompe o heartbeat antes de alterar o estado
+            # da reserva no scheduler.
+            _stop_heartbeat(
+                stop_event,
+                heartbeat_thread,
+            )
+
+            stop_event = None
+            heartbeat_thread = None
+
+            # Só é possível registrar falha com uma reserva válida.
+            if (
+                municipality_code is not None
+                and isinstance(lease_token, str)
+                and lease_token
+            ):
                 try:
-                    mark_municipality_failed(
+                    retried = _record_failure(
                         municipality_code,
                         message,
                         lease_token,
                     )
+
+                    if retried:
+                        stats["retried"] += 1
+
                 except Exception:
                     logger.exception(
-                        "Não foi possível registrar a falha "
-                        "do município %s. A reserva poderá ser "
-                        "recuperada após expirar.",
+                        "Não foi possível registrar ou reenfileirar "
+                        "a falha do município %s. "
+                        "A recuperação de reservas interrompidas "
+                        "poderá tratar o caso posteriormente.",
                         municipality_code,
                     )
 
         finally:
-            if stop_event is not None and heartbeat_thread is not None:
-                _stop_heartbeat(
-                    stop_event,
-                    heartbeat_thread,
-                )
+            # Proteção adicional para qualquer saída inesperada.
+            _stop_heartbeat(
+                stop_event,
+                heartbeat_thread,
+            )
 
             stats["processed"] += 1
 
     logger.info(
-        "Worker encerrado. Processados: %s; concluídos: %s; "
-        "falhas: %s; resultados salvos: %s.",
+        "Worker encerrado. Tentativas: %s; concluídos: %s; "
+        "falhas: %s; reenfileirados: %s; resultados salvos: %s.",
         stats["processed"],
         stats["completed"],
         stats["failed"],
+        stats["retried"],
         stats["results_saved"],
     )
 
@@ -502,7 +633,7 @@ def main():
         "--max-municipalities",
         type=int,
         default=DEFAULT_MAX_MUNICIPALITIES,
-        help="Máximo de municípios nesta execução. Padrão: 1.",
+        help="Máximo de tentativas nesta execução. Padrão: 1.",
     )
 
     parser.add_argument(
