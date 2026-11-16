@@ -1,10 +1,8 @@
-
-import time
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
-
-import httpx
+from pathlib import Path
 
 from app.company_discovery import (
     CareerPageCandidate,
@@ -24,13 +22,14 @@ from app.search_engine import (
 MAX_NATIONAL_QUERIES = 60
 MAX_MUNICIPALITIES_PER_BATCH = 60
 
-IBGE_MUNICIPALITIES_URL = (
-    "https://servicodados.ibge.gov.br/api/v1/localidades/municipios"
+# O catálogo é versionado junto com o projeto. A leitura local evita depender
+# da disponibilidade da API do IBGE durante os testes e a execução do worker.
+MUNICIPALITIES_CATALOG_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "data"
+    / "ibge"
+    / "municipios.json"
 )
-
-IBGE_TIMEOUT = 30.0
-IBGE_MAX_ATTEMPTS = 3
-IBGE_RETRY_DELAY = 1.0
 
 
 NATIONAL_SEARCHES = {
@@ -123,9 +122,46 @@ BRAZILIAN_STATE_CODES = frozenset(
     category.removeprefix("state:") for category in STATE_SEARCHES
 )
 
+# Os códigos oficiais de UF usados como prefixo dos códigos municipais do IBGE.
+UF_IBGE_CODES = {
+    "RO": "11",
+    "AC": "12",
+    "AM": "13",
+    "RR": "14",
+    "PA": "15",
+    "AP": "16",
+    "TO": "17",
+    "MA": "21",
+    "PI": "22",
+    "CE": "23",
+    "RN": "24",
+    "PB": "25",
+    "PE": "26",
+    "AL": "27",
+    "SE": "28",
+    "BA": "29",
+    "MG": "31",
+    "ES": "32",
+    "RJ": "33",
+    "SP": "35",
+    "PR": "41",
+    "SC": "42",
+    "RS": "43",
+    "MS": "50",
+    "MT": "51",
+    "GO": "52",
+    "DF": "53",
+}
+
+STATE_NAME_TO_CODE = {
+    name.casefold(): code
+    for category, name in STATE_SEARCHES.items()
+    for code in (category.removeprefix("state:"),)
+}
+
 
 class MunicipalityCatalogError(RuntimeError):
-    """Erro ao consultar ou interpretar o cadastro municipal do IBGE."""
+    """Erro ao localizar, ler ou validar o catálogo municipal local do IBGE."""
 
 
 @dataclass(frozen=True)
@@ -161,146 +197,182 @@ class NationalDiscoveryReport:
     matches: tuple[DiscoveryMatch, ...] = ()
 
 
-def _extract_municipality_state(item: dict) -> str | None:
-    """Obtém a UF considerando a estrutura atual e a estrutura legada do IBGE."""
+def _normalize_catalog_state(value: object) -> str | None:
+    """Converte a sigla ou o nome completo da UF para a sigla oficial."""
 
-    immediate = item.get("regiao-imediata") or {}
-    intermediate = immediate.get("regiao-intermediaria") or {}
-    uf = intermediate.get("UF") or {}
+    if not isinstance(value, str) or not value.strip():
+        return None
 
-    if uf.get("sigla"):
-        return uf["sigla"]
+    normalized = value.strip()
+    upper = normalized.upper()
 
-    microregion = item.get("microrregiao") or {}
-    mesoregion = microregion.get("mesorregiao") or {}
-    uf = mesoregion.get("UF") or {}
+    if upper in BRAZILIAN_STATE_CODES:
+        return upper
 
-    return uf.get("sigla")
+    return STATE_NAME_TO_CODE.get(normalized.casefold())
 
 
-def _request_ibge_catalog():
-    """Consulta o IBGE com novas tentativas para falhas temporárias."""
+def _normalize_uf_code(value: object) -> str | None:
+    """Normaliza codigo_uf sem aceitar booleanos ou valores não numéricos."""
 
-    headers = {
-        "User-Agent": (
-            "BuscaVagasBot/0.1 "
-            "(public Brazilian municipality catalog)"
+    if isinstance(value, bool):
+        return None
+
+    if isinstance(value, int):
+        normalized = str(value)
+    elif isinstance(value, str) and value.strip().isdigit():
+        normalized = value.strip()
+    else:
+        return None
+
+    return normalized.zfill(2) if len(normalized) <= 2 else None
+
+
+def _required_catalog_text(item: dict, field: str) -> str | None:
+    value = item.get(field)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
+
+
+def _parse_catalog_municipality(item: object) -> Municipality:
+    """Valida os campos do DTB e converte um registro para Municipality."""
+
+    if not isinstance(item, dict):
+        raise MunicipalityCatalogError(
+            "O catálogo contém um registro municipal inválido."
         )
-    }
 
-    last_error = None
+    code = item.get("codigo_ibge")
+    name = _required_catalog_text(item, "municipio")
+    state = _normalize_catalog_state(item.get("uf"))
+    uf_code = _normalize_uf_code(item.get("codigo_uf"))
 
-    for attempt in range(1, IBGE_MAX_ATTEMPTS + 1):
-        try:
-            response = httpx.get(
-                IBGE_MUNICIPALITIES_URL,
-                params={"orderBy": "nome"},
-                timeout=IBGE_TIMEOUT,
-                follow_redirects=False,
-                trust_env=False,
-                headers=headers,
-            )
+    if (
+        not isinstance(code, str)
+        or len(code) != 7
+        or not code.isdigit()
+        or name is None
+        or state is None
+        or uf_code is None
+    ):
+        raise MunicipalityCatalogError(
+            "O catálogo contém dados municipais incompletos ou inválidos."
+        )
 
-            response.raise_for_status()
-            return response
+    expected_uf_code = UF_IBGE_CODES[state]
+    if uf_code != expected_uf_code or code[:2] != expected_uf_code:
+        raise MunicipalityCatalogError(
+            f"O município {name!r} possui código IBGE ou código de UF incompatível."
+        )
 
-        except httpx.TimeoutException as exc:
-            last_error = exc
-            error_message = "tempo limite de conexão com o IBGE"
+    # O catálogo DTB contém nove campos por município. Validá-los impede que
+    # um arquivo truncado ou parcialmente gerado seja aceito como completo.
+    intermediate_code = _required_catalog_text(
+        item,
+        "codigo_regiao_intermediaria",
+    )
+    intermediate_name = _required_catalog_text(
+        item,
+        "regiao_intermediaria",
+    )
+    immediate_code = _required_catalog_text(
+        item,
+        "codigo_regiao_imediata",
+    )
+    immediate_name = _required_catalog_text(
+        item,
+        "regiao_imediata",
+    )
+    municipality_code = _required_catalog_text(item, "codigo_municipio")
 
-        except httpx.ConnectError as exc:
-            last_error = exc
-            error_message = "falha de conexão com o IBGE"
+    if (
+        intermediate_code is None
+        or not intermediate_code.isdigit()
+        or len(intermediate_code) != 4
+        or intermediate_name is None
+        or immediate_code is None
+        or not immediate_code.isdigit()
+        or len(immediate_code) != 6
+        or immediate_name is None
+        or municipality_code is None
+        or not municipality_code.isdigit()
+        or len(municipality_code) != 5
+        or municipality_code != code[-5:]
+    ):
+        raise MunicipalityCatalogError(
+            f"O município {name!r} possui dados territoriais incompletos ou inválidos."
+        )
 
-        except httpx.HTTPStatusError as exc:
-            status_code = exc.response.status_code
-
-            if status_code != 429 and status_code < 500:
-                raise MunicipalityCatalogError(
-                    f"O IBGE respondeu com erro HTTP {status_code}."
-                ) from exc
-
-            last_error = exc
-            error_message = (
-                f"o IBGE respondeu com erro HTTP {status_code}"
-            )
-
-        except httpx.TransportError as exc:
-            last_error = exc
-            error_message = "falha de transporte na conexão com o IBGE"
-
-        if attempt < IBGE_MAX_ATTEMPTS:
-            time.sleep(IBGE_RETRY_DELAY * attempt)
-
-    raise MunicipalityCatalogError(
-        f"Não foi possível consultar o cadastro municipal do IBGE "
-        f"após {IBGE_MAX_ATTEMPTS} tentativas: {error_message}."
-    ) from last_error
+    return Municipality(
+        code=code,
+        name=name,
+        state=state,
+    )
 
 
 @lru_cache(maxsize=1)
 def load_brazilian_municipalities() -> tuple[Municipality, ...]:
-    """Carrega e valida o cadastro nacional de municípios do IBGE.
+    """Carrega e valida os municípios do catálogo JSON local do IBGE.
 
-    O resultado fica em cache durante a execução do processo.
+    O arquivo oficial é mantido em data/ibge/municipios.json. O resultado
+    validado fica em cache durante a execução do processo.
     """
 
-    response = _request_ibge_catalog()
-
     try:
-        payload = response.json()
-    except ValueError as exc:
+        with MUNICIPALITIES_CATALOG_PATH.open(
+            "r",
+            encoding="utf-8",
+        ) as catalog_file:
+            payload = json.load(catalog_file)
+    except FileNotFoundError as exc:
         raise MunicipalityCatalogError(
-            "O IBGE retornou uma resposta JSON inválida."
+            "O catálogo municipal local não foi encontrado em "
+            f"{MUNICIPALITIES_CATALOG_PATH}."
+        ) from exc
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise MunicipalityCatalogError(
+            "Não foi possível ler o catálogo municipal JSON local."
         ) from exc
 
-    if not isinstance(payload, list) or not payload:
+    if not isinstance(payload, dict):
         raise MunicipalityCatalogError(
-            "O cadastro municipal do IBGE está vazio ou inválido."
+            "A estrutura principal do catálogo municipal é inválida."
+        )
+
+    records = payload.get("municipios")
+    if not isinstance(records, list) or not records:
+        raise MunicipalityCatalogError(
+            "O catálogo municipal está vazio ou não contém uma lista válida."
+        )
+
+    declared_total = payload.get("total_municipios")
+    if (
+        isinstance(declared_total, bool)
+        or not isinstance(declared_total, int)
+        or declared_total != len(records)
+    ):
+        raise MunicipalityCatalogError(
+            "O total declarado de municípios não corresponde aos registros do catálogo."
         )
 
     municipalities = []
     seen_codes = set()
 
-    for item in payload:
-        if not isinstance(item, dict):
+    for item in records:
+        municipality = _parse_catalog_municipality(item)
+
+        if municipality.code in seen_codes:
             raise MunicipalityCatalogError(
-                "O cadastro contém um município inválido."
+                f"O catálogo contém código municipal duplicado: {municipality.code}."
             )
 
-        code = item.get("id")
-        name = item.get("nome")
-        state = _extract_municipality_state(item)
-
-        if (
-            isinstance(code, bool)
-            or not isinstance(code, int)
-            or not isinstance(name, str)
-            or not name.strip()
-            or not isinstance(state, str)
-            or state.upper() not in BRAZILIAN_STATE_CODES
-            or len(str(code)) != 7
-        ):
-            raise MunicipalityCatalogError(
-                "O cadastro contém dados municipais incompletos."
-            )
-
-        if code in seen_codes:
-            continue
-
-        seen_codes.add(code)
-
-        municipalities.append(
-            Municipality(
-                code=str(code),
-                name=name.strip(),
-                state=state.upper(),
-            )
-        )
+        seen_codes.add(municipality.code)
+        municipalities.append(municipality)
 
     if not municipalities:
         raise MunicipalityCatalogError(
-            "Nenhum município válido foi encontrado no cadastro do IBGE."
+            "Nenhum município válido foi encontrado no catálogo local."
         )
 
     return tuple(
@@ -320,8 +392,7 @@ def build_municipal_queries(
 ) -> tuple[tuple[str, str, str, str], ...]:
     """Cria as consultas de um lote municipal.
 
-    Cada item contém:
-    (categoria, consulta, município, UF).
+    Cada item contém: (categoria, consulta, município, UF).
     """
 
     if (
@@ -650,9 +721,10 @@ class NationalDiscoveryCoordinator:
             not isinstance(state, str)
             or len(state) != 2
             or not state.isalpha()
+            or state.upper() not in BRAZILIAN_STATE_CODES
         ):
             raise ValueError(
-                "A UF do município deve conter duas letras."
+                "A UF do município deve ser uma sigla brasileira válida."
             )
 
         name = name.strip()
