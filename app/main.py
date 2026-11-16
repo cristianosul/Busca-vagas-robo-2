@@ -24,6 +24,7 @@ from app.repository import (
 )
 from app.search_engine import (
     SearchEngine,
+    SearchProviderError,
     TavilySearchProvider,
 )
 from app.municipality_scheduler import (
@@ -36,6 +37,8 @@ from app.municipality_scheduler import (
 from app.national_discovery import (
     MunicipalityCatalogError,
     MAX_MUNICIPALITIES_PER_BATCH,
+    NationalDiscoveryCoordinator,
+    discover_career_pages,
     load_brazilian_municipalities,
     municipality_batch_count,
 )
@@ -286,6 +289,220 @@ def discover_web_results(
         raise HTTPException(
             status_code=500,
             detail="Não foi possível realizar a pesquisa.",
+        )
+
+
+def _discovery_http_status(message: str) -> int:
+    """Converte falhas conhecidas do provedor em status HTTP seguros."""
+
+    if "TAVILY_API_KEY" in message:
+        return 503
+    if "Limite de utilização" in message:
+        return 429
+    if "temporariamente indisponível" in message:
+        return 503
+    return 502
+
+
+@app.post("/api/discovery/national")
+def discover_national_sources(
+    categories: list[str] | None = Query(default=None),
+    limit: int = Query(default=10, ge=1, le=20),
+    include_geography: bool = Query(default=False),
+    x_admin_token: str | None = Header(
+        default=None,
+        alias="X-Admin-Token",
+    ),
+):
+    """Pesquisa categorias nacionais e, opcionalmente, regiões e UFs.
+
+    A operação apenas descobre resultados: não cadastra fontes,
+    não cria oportunidades e não publica vagas.
+    """
+
+    require_source_admin(x_admin_token)
+
+    try:
+        coordinator = NationalDiscoveryCoordinator(
+            SearchEngine(providers=[TavilySearchProvider()])
+        )
+        report = coordinator.search_national(
+            categories=categories,
+            limit_per_query=limit,
+            include_geography=include_geography,
+        )
+
+        return {
+            "queries": list(report.queries),
+            "total_queries": len(report.queries),
+            "total_results": len(report.results),
+            "total_matches": len(report.matches),
+            "results": [
+                {
+                    "title": result.title,
+                    "url": result.url,
+                    "snippet": result.snippet,
+                    "provider": result.provider,
+                }
+                for result in report.results
+            ],
+            "matches": [
+                {
+                    "category": match.category,
+                    "query": match.query,
+                    "normalized_url": match.normalized_url,
+                    "municipality": match.municipality,
+                    "state": match.state,
+                    "title": match.result.title,
+                    "url": match.result.url,
+                    "snippet": match.result.snippet,
+                    "provider": match.result.provider,
+                }
+                for match in report.matches
+            ],
+            "errors": [
+                {"query": error.query, "message": error.message}
+                for error in report.errors
+            ],
+            "saved": False,
+            "publishing_enabled": False,
+        }
+
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    except SearchProviderError as exc:
+        message = str(exc)
+        raise HTTPException(
+            status_code=_discovery_http_status(message),
+            detail=message,
+        ) from exc
+
+    except Exception:
+        logger.exception("Erro inesperado na descoberta nacional")
+        raise HTTPException(
+            status_code=500,
+            detail="Não foi possível concluir a descoberta nacional.",
+        )
+
+
+@app.post("/api/discovery/company")
+def discover_company_sources(
+    company_name: str = Query(..., min_length=2, max_length=150),
+    limit: int = Query(default=10, ge=1, le=20),
+    x_admin_token: str | None = Header(
+        default=None,
+        alias="X-Admin-Token",
+    ),
+):
+    """Pesquisa páginas e oportunidades associadas a uma empresa."""
+
+    require_source_admin(x_admin_token)
+
+    try:
+        coordinator = NationalDiscoveryCoordinator(
+            SearchEngine(providers=[TavilySearchProvider()])
+        )
+        report = coordinator.search_company(
+            company_name=company_name,
+            limit_per_query=limit,
+        )
+        return {
+            "company_name": " ".join(company_name.split()),
+            "queries": list(report.queries),
+            "total_results": len(report.results),
+            "results": [
+                {
+                    "title": result.title,
+                    "url": result.url,
+                    "snippet": result.snippet,
+                    "provider": result.provider,
+                }
+                for result in report.results
+            ],
+            "matches": [
+                {
+                    "category": match.category,
+                    "query": match.query,
+                    "normalized_url": match.normalized_url,
+                    "title": match.result.title,
+                    "url": match.result.url,
+                    "snippet": match.result.snippet,
+                    "provider": match.result.provider,
+                }
+                for match in report.matches
+            ],
+            "errors": [
+                {"query": error.query, "message": error.message}
+                for error in report.errors
+            ],
+            "saved": False,
+            "publishing_enabled": False,
+        }
+
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    except SearchProviderError as exc:
+        message = str(exc)
+        raise HTTPException(
+            status_code=_discovery_http_status(message),
+            detail=message,
+        ) from exc
+
+    except Exception:
+        logger.exception("Erro inesperado na pesquisa de empresa")
+        raise HTTPException(
+            status_code=500,
+            detail="Não foi possível pesquisar a empresa.",
+        )
+
+
+@app.post("/api/discovery/company/career-pages")
+def inspect_company_career_pages(
+    company_name: str = Query(..., min_length=2, max_length=150),
+    official_site_url: str = Query(..., min_length=9, max_length=2048),
+    x_admin_token: str | None = Header(
+        default=None,
+        alias="X-Admin-Token",
+    ),
+):
+    """Inspeciona somente o site oficial informado para localizar carreiras."""
+
+    require_source_admin(x_admin_token)
+
+    try:
+        candidates = discover_career_pages(
+            company_name=company_name,
+            official_site_url=official_site_url,
+        )
+        return {
+            "company_name": company_name.strip(),
+            "official_site_url": official_site_url,
+            "total": len(candidates),
+            "career_pages": [
+                {
+                    "company_name": candidate.company_name,
+                    "page_url": candidate.page_url,
+                    "link_text": candidate.link_text,
+                }
+                for candidate in candidates
+            ],
+            "saved": False,
+            "publishing_enabled": False,
+        }
+
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail=str(exc)) from exc
+
+    except Exception:
+        logger.exception("Erro inesperado ao inspecionar site de empresa")
+        raise HTTPException(
+            status_code=502,
+            detail="Não foi possível inspecionar o site informado.",
         )
 
 
