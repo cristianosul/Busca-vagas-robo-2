@@ -1,6 +1,7 @@
 
 import json
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -13,6 +14,9 @@ from app.scoring import score_candidate
 
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 DB_PATH = Path(os.getenv("DATABASE_PATH", "./data/staging.db"))
+
+# Identificador fixo para serializar as migrações no PostgreSQL.
+MIGRATION_LOCK_ID = 731202611
 
 TRACKING_KEYS = {
     "fbclid", "gclid", "dclid", "msclkid", "ref", "referrer"
@@ -61,7 +65,6 @@ def normalize_job_url(value: str) -> str:
         raise ValueError("Porta inválida na URL original.")
 
     if ":" in hostname:
-        # Endereços IPv6 precisam estar entre colchetes na URL.
         if not parts.netloc.startswith("["):
             raise ValueError("Endereço IPv6 inválido na URL original.")
 
@@ -128,7 +131,146 @@ def normalize_job_url(value: str) -> str:
         query,
         "",
     ))
-    
+
+
+def _convert_sql_placeholders(sql: str) -> str:
+    """
+    Converte placeholders ? para %s sem alterar conteúdo entre aspas
+    ou comentários SQL.
+
+    Também preserva delimitadores dollar-quoted do PostgreSQL.
+    """
+    result = []
+    index = 0
+    length = len(sql)
+
+    state = "normal"
+    dollar_delimiter = None
+    block_comment_depth = 0
+
+    while index < length:
+        char = sql[index]
+        next_char = sql[index + 1] if index + 1 < length else ""
+
+        if state == "normal":
+            if char == "'":
+                result.append(char)
+                state = "single_quote"
+                index += 1
+                continue
+
+            if char == '"':
+                result.append(char)
+                state = "double_quote"
+                index += 1
+                continue
+
+            if char == "-" and next_char == "-":
+                result.append("--")
+                state = "line_comment"
+                index += 2
+                continue
+
+            if char == "/" and next_char == "*":
+                result.append("/*")
+                state = "block_comment"
+                block_comment_depth = 1
+                index += 2
+                continue
+
+            if char == "$":
+                match = re.match(
+                    r"\$[A-Za-z_][A-Za-z0-9_]*\$|\$\$",
+                    sql[index:],
+                )
+
+                if match:
+                    dollar_delimiter = match.group(0)
+                    result.append(dollar_delimiter)
+                    state = "dollar_quote"
+                    index += len(dollar_delimiter)
+                    continue
+
+            if char == "?":
+                result.append("%s")
+            else:
+                result.append(char)
+
+            index += 1
+            continue
+
+        if state == "single_quote":
+            result.append(char)
+
+            if char == "'" and next_char == "'":
+                result.append(next_char)
+                index += 2
+                continue
+
+            if char == "'":
+                state = "normal"
+
+            index += 1
+            continue
+
+        if state == "double_quote":
+            result.append(char)
+
+            if char == '"' and next_char == '"':
+                result.append(next_char)
+                index += 2
+                continue
+
+            if char == '"':
+                state = "normal"
+
+            index += 1
+            continue
+
+        if state == "line_comment":
+            result.append(char)
+
+            if char == "\n":
+                state = "normal"
+
+            index += 1
+            continue
+
+        if state == "block_comment":
+            if char == "/" and next_char == "*":
+                result.append("/*")
+                block_comment_depth += 1
+                index += 2
+                continue
+
+            if char == "*" and next_char == "/":
+                result.append("*/")
+                block_comment_depth -= 1
+                index += 2
+
+                if block_comment_depth == 0:
+                    state = "normal"
+
+                continue
+
+            result.append(char)
+            index += 1
+            continue
+
+        if state == "dollar_quote":
+            if sql.startswith(dollar_delimiter, index):
+                result.append(dollar_delimiter)
+                index += len(dollar_delimiter)
+                dollar_delimiter = None
+                state = "normal"
+                continue
+
+            result.append(char)
+            index += 1
+            continue
+
+    return "".join(result)
+
 
 def connect():
     """Conecta ao Neon ou ao SQLite local."""
@@ -176,7 +318,7 @@ def db_session(immediate: bool = False):
 def execute(conn, sql, params=()):
     """Compatibiliza parâmetros SQLite e PostgreSQL."""
     if DATABASE_URL:
-        sql = sql.replace("?", "%s")
+        sql = _convert_sql_placeholders(sql)
 
     return conn.execute(sql, params)
 
@@ -205,7 +347,7 @@ def _get_table_columns(conn, table_name: str) -> set[str]:
     ).fetchall()
 
     return {row["name"] for row in rows}
-    
+
 
 def _ensure_column(
     conn,
@@ -231,10 +373,17 @@ def _ensure_column(
     columns = _get_table_columns(conn, table_name)
 
     if column_name not in columns:
-        conn.execute(
-            f"ALTER TABLE {table_name} "
-            f"ADD COLUMN {column_name} {column_definition}"
-        )
+        if DATABASE_URL:
+            conn.execute(
+                f"ALTER TABLE {table_name} "
+                f"ADD COLUMN IF NOT EXISTS "
+                f"{column_name} {column_definition}"
+            )
+        else:
+            conn.execute(
+                f"ALTER TABLE {table_name} "
+                f"ADD COLUMN {column_name} {column_definition}"
+            )
 
 
 def serialize_source(row):
@@ -249,9 +398,20 @@ def serialize_source(row):
 
 
 def init_db():
-    """Cria e atualiza as tabelas sem apagar registros existentes."""
-    with db_session() as conn:
+    """
+    Cria e atualiza as tabelas sem apagar registros existentes.
+
+    Serializa as migrações:
+    - SQLite: BEGIN IMMEDIATE.
+    - PostgreSQL: advisory transaction lock.
+    """
+    with db_session(immediate=True) as conn:
         if DATABASE_URL:
+            conn.execute(
+                "SELECT pg_advisory_xact_lock(%s)",
+                (MIGRATION_LOCK_ID,),
+            )
+
             conn.execute("""
                 CREATE TABLE IF NOT EXISTS candidates (
                     id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
@@ -387,7 +547,7 @@ def init_db():
                 WHERE id = ?
                 """,
                 (normalized, row["id"]),
-            )            
+            )
 
         duplicates = execute(
             conn,
@@ -565,7 +725,7 @@ def save_source(source: SourceCreate):
             )
 
     return get_source_record(data["source_id"])
-    
+
 
 def get_source_record(source_id: str):
     """Consulta uma fonte pelo identificador."""
@@ -638,7 +798,7 @@ def update_source_status(source_id: str, enabled: bool):
         return None
 
     return get_source_record(source_id)
-    
+
 
 def list_candidates(status: str | None = None, limit: int = 50):
     """Lista oportunidades incluindo os dados e evidências armazenados."""
@@ -713,4 +873,3 @@ def list_candidates(status: str | None = None, limit: int = 50):
         })
 
     return results
-    
