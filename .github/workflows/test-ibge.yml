@@ -8,7 +8,7 @@ permissions:
   contents: read
 
 jobs:
-  ibge-live:
+  ibge-catalog:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
 
@@ -26,12 +26,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install xlrd==2.0.1
 
-      - name: Inspecionar planilha oficial de municipios
+      - name: Baixar e gerar catalogo oficial de municipios
         run: |
           python - <<'PY'
           import io
+          import json
+          import re
           import urllib.request
           import zipfile
+          from pathlib import Path
+
           import xlrd
 
           ZIP_URL = (
@@ -43,8 +47,42 @@ jobs:
           )
 
           XLS_NAME = "RELATORIO_DTB_BRASIL_2025_MUNICIPIOS.xls"
+          SHEET_NAME = "DTB_Municípios"
+          EXPECTED_TOTAL = 5571
 
-          print("Baixando catalogo oficial DTB 2025...")
+          EXPECTED_UFS = {
+              "11", "12", "13", "14", "15", "16", "17",
+              "21", "22", "23", "24", "25", "26", "27",
+              "28", "29", "31", "32", "33", "35", "41",
+              "42", "43", "50", "51", "52", "53",
+          }
+
+          def normalize_code(value, width):
+              if value is None:
+                  raise ValueError("Código vazio")
+
+              if isinstance(value, float):
+                  if not value.is_integer():
+                      raise ValueError(f"Código numérico inválido: {value}")
+                  value = str(int(value))
+              elif isinstance(value, int):
+                  value = str(value)
+              else:
+                  value = str(value).strip()
+                  if value.endswith(".0"):
+                      value = value[:-2]
+
+              if not value.isdigit():
+                  raise ValueError(f"Código não numérico: {value!r}")
+
+              return value.zfill(width)
+
+          def normalize_name(value):
+              if value is None:
+                  return ""
+              return str(value).strip()
+
+          print("Baixando a Divisão Territorial Brasileira 2025...")
 
           request = urllib.request.Request(
               ZIP_URL,
@@ -52,14 +90,16 @@ jobs:
           )
 
           with urllib.request.urlopen(request, timeout=60) as response:
-              print("HTTP:", response.status)
+              if response.status != 200:
+                  raise RuntimeError(
+                      f"Download falhou: HTTP {response.status}"
+                  )
               zip_data = response.read()
 
-          print("Bytes recebidos:", len(zip_data))
+          print(f"Download concluído: {len(zip_data):,} bytes")
 
           with zipfile.ZipFile(io.BytesIO(zip_data)) as archive:
               bad_file = archive.testzip()
-
               if bad_file:
                   raise RuntimeError(
                       f"Arquivo ZIP corrompido: {bad_file}"
@@ -72,7 +112,7 @@ jobs:
 
               if len(matches) != 1:
                   raise RuntimeError(
-                      f"Planilha nao encontrada: {matches}"
+                      f"Planilha esperada não encontrada: {matches}"
                   )
 
               xls_data = archive.read(matches[0])
@@ -82,56 +122,178 @@ jobs:
               on_demand=False,
           )
 
-          print("\n=== ABAS DA PLANILHA ===")
+          sheet = workbook.sheet_by_name(SHEET_NAME)
 
-          for sheet in workbook.sheets():
-              print(
-                  f"Aba: {sheet.name} | "
-                  f"Linhas: {sheet.nrows} | "
-                  f"Colunas: {sheet.ncols}"
+          print(f"Planilha: {matches[0]}")
+          print(f"Aba: {sheet.name}")
+          print(f"Linhas disponíveis: {sheet.nrows}")
+
+          # Cabeçalho confirmado na linha 7 da planilha oficial.
+          header = [
+              str(sheet.cell_value(6, col)).strip()
+              for col in range(sheet.ncols)
+          ]
+
+          required_headers = {
+              "Município",
+              "Código Município Completo",
+              "Nome_Município",
+          }
+
+          missing_headers = required_headers - set(header)
+          if missing_headers:
+              raise RuntimeError(
+                  f"Cabeçalhos esperados não encontrados: {missing_headers}"
               )
 
-          sheet = workbook.sheet_by_name("DTB_Municípios")
+          if sheet.ncols < 9:
+              raise RuntimeError(
+                  f"Planilha possui apenas {sheet.ncols} colunas."
+              )
 
-          print("\n=== PRIMEIRAS 15 LINHAS ORIGINAIS ===")
-          print("Aba:", sheet.name)
+          municipios = []
+          codigos = set()
+          ufs_encontradas = set()
 
-          for row_index in range(min(15, sheet.nrows)):
-              print(f"\nLINHA {row_index + 1}:")
+          # Dados começam na linha 8.
+          # Coluna 8 = código completo.
+          # Coluna 9 = nome correto do município.
+          for row_index in range(7, sheet.nrows):
+              row = sheet.row_values(row_index)
 
-              for col_index in range(sheet.ncols):
-                  cell = sheet.cell(row_index, col_index)
-                  value = cell.value
+              if len(row) < 9:
+                  continue
 
-                  print(
-                      f"Coluna {col_index + 1}: "
-                      f"valor={value!r} | "
-                      f"tipo={cell.ctype}"
+              codigo_completo_raw = row[7]
+              nome_municipio_raw = row[8]
+
+              if codigo_completo_raw in ("", None):
+                  continue
+
+              codigo_ibge = normalize_code(
+                  codigo_completo_raw, 7
+              )
+              municipio = normalize_name(nome_municipio_raw)
+
+              if not municipio:
+                  raise RuntimeError(
+                      f"Nome vazio na linha {row_index + 1}"
                   )
 
-          print("\n=== RESUMO DOS CABECALHOS ===")
+              if codigo_ibge in codigos:
+                  raise RuntimeError(
+                      f"Código IBGE duplicado: {codigo_ibge}"
+                  )
 
-          for row_index in range(min(15, sheet.nrows)):
-              values = [
-                  str(sheet.cell_value(row_index, col)).strip()
-                  for col in range(sheet.ncols)
-              ]
+              codigo_uf = normalize_code(row[0], 2)
+              nome_uf = normalize_name(row[1])
 
-              print(
-                  f"Linha {row_index + 1}: "
-                  + " | ".join(values)
+              if codigo_ibge[:2] != codigo_uf:
+                  raise RuntimeError(
+                      f"UF incompatível na linha {row_index + 1}: "
+                      f"{codigo_ibge} / {codigo_uf}"
+                  )
+
+              if not nome_uf:
+                  raise RuntimeError(
+                      f"Nome da UF vazio na linha {row_index + 1}"
+                  )
+
+              registro = {
+                  "codigo_ibge": codigo_ibge,
+                  "municipio": municipio,
+                  "codigo_uf": codigo_uf,
+                  "uf": nome_uf,
+                  "codigo_regiao_intermediaria": normalize_code(
+                      row[2], 4
+                  ),
+                  "regiao_intermediaria": normalize_name(row[3]),
+                  "codigo_regiao_imediata": normalize_code(
+                      row[4], 6
+                  ),
+                  "regiao_imediata": normalize_name(row[5]),
+                  "codigo_municipio": normalize_code(row[6], 5),
+              }
+
+              municipios.append(registro)
+              codigos.add(codigo_ibge)
+              ufs_encontradas.add(codigo_uf)
+
+          print(f"Municípios encontrados: {len(municipios)}")
+          print(f"Códigos únicos: {len(codigos)}")
+          print(f"UFs encontradas: {len(ufs_encontradas)}")
+
+          if len(municipios) != EXPECTED_TOTAL:
+              raise RuntimeError(
+                  f"Quantidade inesperada: {len(municipios)}. "
+                  f"Esperado: {EXPECTED_TOTAL}."
               )
 
-          print("\n=== FIM DA INSPECAO ===")
+          if len(codigos) != EXPECTED_TOTAL:
+              raise RuntimeError(
+                  "A quantidade de códigos únicos não corresponde "
+                  "à quantidade de municípios."
+              )
+
+          if ufs_encontradas != EXPECTED_UFS:
+              raise RuntimeError(
+                  "Conjunto de UFs inválido. "
+                  f"Encontradas: {sorted(ufs_encontradas)}"
+              )
+
+          municipios.sort(
+              key=lambda item: (
+                  item["codigo_uf"],
+                  item["municipio"].casefold(),
+              )
+          )
+
+          catalogo = {
+              "fonte": "IBGE - Divisão Territorial Brasileira",
+              "ano_referencia": 2025,
+              "arquivo_origem": XLS_NAME,
+              "aba_origem": SHEET_NAME,
+              "total_municipios": len(municipios),
+              "total_ufs": len(ufs_encontradas),
+              "municipios": municipios,
+          }
+
+          output_path = Path("data/ibge/municipios.json")
+          output_path.parent.mkdir(
+              parents=True,
+              exist_ok=True,
+          )
+
+          output_path.write_text(
+              json.dumps(
+                  catalogo,
+                  ensure_ascii=False,
+                  indent=2,
+              ) + "\n",
+              encoding="utf-8",
+          )
+
+          print("\n=== CATÁLOGO GERADO ===")
+          print(f"Arquivo: {output_path}")
+          print(f"Municípios: {len(municipios)}")
+          print(f"UFs: {len(ufs_encontradas)}")
+          print(f"Tamanho: {output_path.stat().st_size:,} bytes")
+
+          print("\n=== AMOSTRAS ===")
+          for item in municipios[:5]:
+              print(
+                  f'{item["codigo_ibge"]} - '
+                  f'{item["municipio"]}/{item["uf"]}'
+              )
+
+          print("\nValidação concluída com sucesso.")
           PY
 
-      - name: Instalar dependencias do projeto
-        run: |
-          pip install -r requirements.txt
-          pip install pytest
-
-      - name: Executar testes reais do IBGE
-        env:
-          RUN_LIVE_IBGE_TESTS: "1"
-        run: python -m pytest -q tests/test_ibge_live.py
-        
+      - name: Disponibilizar catalogo como artefato
+        uses: actions/upload-artifact@v4
+        with:
+          name: municipios-ibge-dtb-2025
+          path: data/ibge/municipios.json
+          if-no-files-found: error
+          retention-days: 30
+          
