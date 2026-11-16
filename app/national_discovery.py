@@ -1,4 +1,5 @@
 
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
@@ -27,7 +28,9 @@ IBGE_MUNICIPALITIES_URL = (
     "https://servicodados.ibge.gov.br/api/v1/localidades/municipios"
 )
 
-IBGE_TIMEOUT = 15.0
+IBGE_TIMEOUT = 30.0
+IBGE_MAX_ATTEMPTS = 3
+IBGE_RETRY_DELAY = 1.0
 
 
 NATIONAL_SEARCHES = {
@@ -121,7 +124,6 @@ BRAZILIAN_STATE_CODES = frozenset(
 )
 
 
-
 class MunicipalityCatalogError(RuntimeError):
     """Erro ao consultar ou interpretar o cadastro municipal do IBGE."""
 
@@ -176,6 +178,66 @@ def _extract_municipality_state(item: dict) -> str | None:
     return uf.get("sigla")
 
 
+def _request_ibge_catalog():
+    """Consulta o IBGE com novas tentativas para falhas temporárias."""
+
+    headers = {
+        "User-Agent": (
+            "BuscaVagasBot/0.1 "
+            "(public Brazilian municipality catalog)"
+        )
+    }
+
+    last_error = None
+
+    for attempt in range(1, IBGE_MAX_ATTEMPTS + 1):
+        try:
+            response = httpx.get(
+                IBGE_MUNICIPALITIES_URL,
+                params={"orderBy": "nome"},
+                timeout=IBGE_TIMEOUT,
+                follow_redirects=False,
+                trust_env=False,
+                headers=headers,
+            )
+
+            response.raise_for_status()
+            return response
+
+        except httpx.TimeoutException as exc:
+            last_error = exc
+            error_message = "tempo limite de conexão com o IBGE"
+
+        except httpx.ConnectError as exc:
+            last_error = exc
+            error_message = "falha de conexão com o IBGE"
+
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
+
+            if status_code != 429 and status_code < 500:
+                raise MunicipalityCatalogError(
+                    f"O IBGE respondeu com erro HTTP {status_code}."
+                ) from exc
+
+            last_error = exc
+            error_message = (
+                f"o IBGE respondeu com erro HTTP {status_code}"
+            )
+
+        except httpx.TransportError as exc:
+            last_error = exc
+            error_message = "falha de transporte na conexão com o IBGE"
+
+        if attempt < IBGE_MAX_ATTEMPTS:
+            time.sleep(IBGE_RETRY_DELAY * attempt)
+
+    raise MunicipalityCatalogError(
+        f"Não foi possível consultar o cadastro municipal do IBGE "
+        f"após {IBGE_MAX_ATTEMPTS} tentativas: {error_message}."
+    ) from last_error
+
+
 @lru_cache(maxsize=1)
 def load_brazilian_municipalities() -> tuple[Municipality, ...]:
     """Carrega e valida o cadastro nacional de municípios do IBGE.
@@ -183,26 +245,7 @@ def load_brazilian_municipalities() -> tuple[Municipality, ...]:
     O resultado fica em cache durante a execução do processo.
     """
 
-    try:
-        response = httpx.get(
-            IBGE_MUNICIPALITIES_URL,
-            params={"orderBy": "nome"},
-            timeout=IBGE_TIMEOUT,
-            follow_redirects=False,
-            trust_env=False,
-            headers={
-                "User-Agent": (
-                    "BuscaVagasBot/0.1 "
-                    "(public Brazilian municipality catalog)"
-                )
-            },
-        )
-        response.raise_for_status()
-
-    except httpx.HTTPError as exc:
-        raise MunicipalityCatalogError(
-            "Não foi possível consultar o cadastro municipal do IBGE."
-        ) from exc
+    response = _request_ibge_catalog()
 
     try:
         payload = response.json()
@@ -561,7 +604,7 @@ class NationalDiscoveryCoordinator:
             query_items,
             limit_per_query,
         )
-  
+
     def search_municipality(
         self,
         municipality: Municipality | dict,
@@ -638,8 +681,7 @@ class NationalDiscoveryCoordinator:
             query_items,
             limit_per_query,
         )
-        
-        
+
     def search_company(
         self,
         company_name: str,
