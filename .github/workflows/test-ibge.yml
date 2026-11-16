@@ -21,23 +21,64 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Diagnosticar acesso a API e arquivos oficiais do IBGE
+      - name: Diagnosticar acesso a API do IBGE
         continue-on-error: true
         run: |
           python - <<'PY'
           import socket
           import urllib.request
-          import urllib.error
-          import zipfile
-          from pathlib import Path
 
-          api_host = "servicodados.ibge.gov.br"
-          api_url = (
+          host = "servicodados.ibge.gov.br"
+          url = (
               "https://servicodados.ibge.gov.br/"
               "api/v1/localidades/municipios"
           )
 
-          zip_url = (
+          print("=== DNS ===")
+          try:
+              for item in socket.getaddrinfo(
+                  host, 443, type=socket.SOCK_STREAM
+              ):
+                  print("Endereco:", item[4][0])
+          except Exception as exc:
+              print("Falha DNS:", repr(exc))
+
+          print("\n=== TCP ===")
+          try:
+              with socket.create_connection((host, 443), timeout=10):
+                  print("Conexao TCP: OK")
+          except Exception as exc:
+              print("Conexao TCP: FALHOU", repr(exc))
+
+          print("\n=== HTTPS ===")
+          try:
+              request = urllib.request.Request(
+                  url,
+                  headers={"User-Agent": "BuscaVagasBot/0.1"},
+              )
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  print("HTTP:", response.status)
+                  print("Content-Type:", response.headers.get("Content-Type"))
+          except Exception as exc:
+              print("HTTPS: FALHOU", repr(exc))
+          PY
+
+      - name: Baixar e converter catalogo oficial DTB 2025
+        run: |
+          python -m pip install xlrd==2.0.1
+
+          python - <<'PY'
+          import io
+          import json
+          import re
+          import unicodedata
+          import urllib.request
+          import zipfile
+          from pathlib import Path
+
+          import xlrd
+
+          ZIP_URL = (
               "https://geoftp.ibge.gov.br/"
               "organizacao_do_territorio/"
               "estrutura_territorial/"
@@ -45,93 +86,268 @@ jobs:
               "2025/DTB_2025.zip"
           )
 
-          print("\n=== DIAGNOSTICO DNS DA API ===")
-          try:
-              addresses = socket.getaddrinfo(
-                  api_host, 443, type=socket.SOCK_STREAM
+          XLS_NAME = "RELATORIO_DTB_BRASIL_2025_MUNICIPIOS.xls"
+          OUTPUT = Path("data/ibge/municipios.json")
+
+          def normalize(value):
+              value = str(value or "").strip().lower()
+              value = unicodedata.normalize("NFKD", value)
+              value = "".join(
+                  char for char in value
+                  if not unicodedata.combining(char)
               )
-              for address in addresses:
-                  print("Endereco:", address[4][0])
-          except Exception as exc:
-              print("Falha DNS:", repr(exc))
+              return re.sub(r"[^a-z0-9]+", "_", value).strip("_")
 
-          print("\n=== DIAGNOSTICO TCP DA API ===")
-          try:
-              with socket.create_connection(
-                  (api_host, 443), timeout=10
-              ):
-                  print("Conexao TCP com a API: SUCESSO")
-          except Exception as exc:
-              print("Conexao TCP com a API: FALHOU")
-              print(repr(exc))
+          def cell_value(cell, datemode):
+              if cell.ctype == xlrd.XL_CELL_EMPTY:
+                  return None
 
-          print("\n=== TESTE HTTPS DA API ===")
-          try:
-              request = urllib.request.Request(
-                  api_url,
-                  headers={"User-Agent": "BuscaVagasBot/0.1"},
-              )
-              with urllib.request.urlopen(
-                  request, timeout=20
-              ) as response:
-                  print("Status HTTP:", response.status)
-                  print("Content-Type:", response.headers.get("Content-Type"))
-                  print("Bytes recebidos:", len(response.read()))
-          except Exception as exc:
-              print("HTTPS da API: FALHOU")
-              print(repr(exc))
+              if cell.ctype == xlrd.XL_CELL_DATE:
+                  return xlrd.xldate.xldate_as_datetime(
+                      cell.value, datemode
+                  ).isoformat()
 
-          print("\n=== TESTE DO ARQUIVO OFICIAL DTB 2025 ===")
-          zip_path = Path("DTB_2025.zip")
+              if cell.ctype == xlrd.XL_CELL_NUMBER:
+                  number = float(cell.value)
+                  if number.is_integer():
+                      return int(number)
+                  return number
 
-          try:
-              request = urllib.request.Request(
-                  zip_url,
-                  headers={"User-Agent": "BuscaVagasBot/0.1"},
-              )
+              if cell.ctype == xlrd.XL_CELL_BOOLEAN:
+                  return bool(cell.value)
 
-              with urllib.request.urlopen(
-                  request, timeout=40
-              ) as response:
-                  print("Status HTTP:", response.status)
-                  print("Content-Type:", response.headers.get("Content-Type"))
-                  data = response.read()
+              if cell.ctype == xlrd.XL_CELL_ERROR:
+                  return None
 
-              zip_path.write_bytes(data)
-              print("Download concluido.")
-              print("Tamanho recebido:", len(data), "bytes")
+              value = str(cell.value).strip()
+              return value if value else None
 
-              with zipfile.ZipFile(zip_path) as archive:
-                  bad_file = archive.testzip()
+          print("Baixando arquivo oficial DTB 2025...")
 
-                  if bad_file:
-                      raise RuntimeError(
-                          f"Arquivo ZIP corrompido: {bad_file}"
+          request = urllib.request.Request(
+              ZIP_URL,
+              headers={"User-Agent": "BuscaVagasBot/0.1"},
+          )
+
+          with urllib.request.urlopen(request, timeout=60) as response:
+              if response.status != 200:
+                  raise RuntimeError(
+                      f"Download retornou HTTP {response.status}"
+                  )
+              zip_data = response.read()
+
+          print("Download:", len(zip_data), "bytes")
+
+          with zipfile.ZipFile(io.BytesIO(zip_data)) as archive:
+              bad_file = archive.testzip()
+              if bad_file:
+                  raise RuntimeError(
+                      f"Arquivo ZIP corrompido: {bad_file}"
+                  )
+
+              names = archive.namelist()
+              matches = [
+                  name for name in names
+                  if name.endswith(XLS_NAME)
+              ]
+
+              if len(matches) != 1:
+                  raise RuntimeError(
+                      "Planilha de municipios nao encontrada "
+                      f"ou encontrada mais de uma vez: {matches}"
+                  )
+
+              xls_data = archive.read(matches[0])
+
+          print("Planilha encontrada:", XLS_NAME)
+
+          workbook = xlrd.open_workbook(
+              file_contents=xls_data,
+              on_demand=False,
+          )
+
+          selected = None
+
+          for sheet in workbook.sheets():
+              for row_index in range(min(sheet.nrows, 40)):
+                  headers = [
+                      normalize(sheet.cell_value(row_index, col))
+                      for col in range(sheet.ncols)
+                  ]
+
+                  name_columns = [
+                      index for index, header in enumerate(headers)
+                      if "municipio" in header
+                      and not any(
+                          token in header
+                          for token in ("codigo", "cod_")
                       )
+                  ]
 
-                  print("Integridade do ZIP: OK")
-                  print("\nArquivos encontrados dentro do ZIP:")
+                  code_columns = [
+                      index for index, header in enumerate(headers)
+                      if "municipio" in header
+                      and (
+                          "codigo" in header
+                          or header.startswith("cod_")
+                      )
+                  ]
 
-                  for item in archive.infolist():
+                  if name_columns and code_columns:
+                      selected = (
+                          sheet,
+                          row_index,
+                          headers,
+                          name_columns[0],
+                          code_columns[0],
+                      )
+                      break
+
+              if selected:
+                  break
+
+          if not selected:
+              print("Planilhas e primeiras linhas para diagnostico:")
+              for sheet in workbook.sheets():
+                  print("Aba:", sheet.name)
+                  for row_index in range(min(sheet.nrows, 12)):
                       print(
-                          f"- {item.filename} "
-                          f"({item.file_size} bytes)"
+                          row_index,
+                          [
+                              sheet.cell_value(row_index, col)
+                              for col in range(min(sheet.ncols, 20))
+                          ],
                       )
+              raise RuntimeError(
+                  "Nao foi possivel identificar automaticamente "
+                  "as colunas de nome e codigo do municipio."
+              )
 
-          except Exception as exc:
-              print("Download ou validacao do DTB: FALHOU")
-              print(repr(exc))
+          sheet, header_row, headers, name_col, code_col = selected
 
-          print("\n=== FIM DO DIAGNOSTICO ===")
+          print("Aba selecionada:", sheet.name)
+          print("Linha dos cabecalhos:", header_row + 1)
+          print("Coluna do municipio:", headers[name_col])
+          print("Coluna do codigo:", headers[code_col])
+
+          unique_headers = []
+          occurrences = {}
+
+          for index, header in enumerate(headers):
+              key = header or f"coluna_{index + 1}"
+              occurrences[key] = occurrences.get(key, 0) + 1
+
+              if occurrences[key] > 1:
+                  key = f"{key}_{occurrences[key]}"
+
+              unique_headers.append(key)
+
+          municipalities = []
+          seen_codes = set()
+
+          for row_index in range(header_row + 1, sheet.nrows):
+              values = [
+                  cell_value(sheet.cell(row_index, col), workbook.datemode)
+                  for col in range(sheet.ncols)
+              ]
+
+              raw_name = values[name_col]
+              raw_code = values[code_col]
+
+              if raw_name is None or raw_code is None:
+                  continue
+
+              name = str(raw_name).strip()
+
+              if isinstance(raw_code, (int, float)):
+                  if not float(raw_code).is_integer():
+                      continue
+                  code = str(int(raw_code))
+              else:
+                  code = re.sub(r"\.0$", "", str(raw_code).strip())
+                  code = re.sub(r"\D", "", code)
+
+              if not re.fullmatch(r"\d{7}", code):
+                  continue
+
+              if code in seen_codes:
+                  raise RuntimeError(
+                      f"Codigo municipal duplicado: {code}"
+                  )
+
+              seen_codes.add(code)
+
+              original_data = {
+                  unique_headers[index]: value
+                  for index, value in enumerate(values)
+                  if value is not None
+              }
+
+              municipalities.append({
+                  "codigo_ibge": code,
+                  "municipio": name,
+                  "dados_originais": original_data,
+              })
+
+          if len(municipalities) < 5000:
+              raise RuntimeError(
+                  "Quantidade inesperada de municipios: "
+                  f"{len(municipalities)}"
+              )
+
+          OUTPUT.parent.mkdir(parents=True, exist_ok=True)
+
+          catalog = {
+              "fonte": "IBGE - Divisao Territorial Brasileira",
+              "ano_referencia": 2025,
+              "arquivo_origem": XLS_NAME,
+              "aba_origem": sheet.name,
+              "total_municipios": len(municipalities),
+              "municipios": municipalities,
+          }
+
+          OUTPUT.write_text(
+              json.dumps(
+                  catalog,
+                  ensure_ascii=False,
+                  indent=2,
+              ) + "\n",
+              encoding="utf-8",
+          )
+
+          print("\n=== VALIDACAO DO CATALOGO ===")
+          print("Total de municipios:", len(municipalities))
+          print("Codigos unicos:", len(seen_codes))
+          print("Arquivo gerado:", OUTPUT)
+          print("Tamanho JSON:", OUTPUT.stat().st_size, "bytes")
+
+          print("\nPrimeiros cinco registros:")
+          for item in municipalities[:5]:
+              print(
+                  item["codigo_ibge"],
+                  "-",
+                  item["municipio"],
+              )
+
+          print("\nCatalogo JSON gerado com sucesso.")
           PY
 
-      - name: Instalar dependencias
+      - name: Disponibilizar catalogo JSON
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: catalogo-municipios-ibge-2025
+          path: data/ibge/municipios.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Instalar dependencias do projeto
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest
 
-      - name: Validar catalogo real do IBGE
+      - name: Executar testes reais do IBGE
         env:
           RUN_LIVE_IBGE_TESTS: "1"
         run: python -m pytest -q tests/test_ibge_live.py
