@@ -5,6 +5,9 @@ from datetime import datetime, timedelta, timezone
 from app.repository import DATABASE_URL, db_session, execute
 
 
+MAX_MUNICIPALITY_ATTEMPTS = 3
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -30,12 +33,10 @@ def _validate_municipality_code(municipality_code: str) -> str:
 
 
 def _validate_lease_token(lease_token: str) -> str:
-    token = str(lease_token).strip()
-
-    if not token:
+    if not isinstance(lease_token, str) or not lease_token.strip():
         raise ValueError("Token de execução inválido.")
 
-    return token
+    return lease_token.strip()
 
 
 def _municipality_data(municipality):
@@ -53,7 +54,13 @@ def _municipality_data(municipality):
     name = str(name).strip() if name is not None else ""
     state = str(state).strip().upper() if state is not None else ""
 
-    if not code or not name or len(state) != 2:
+    if (
+        not code
+        or not name
+        or len(state) != 2
+        or not state.isascii()
+        or not state.isalpha()
+    ):
         raise ValueError("Dados de município inválidos.")
 
     if len(code) != 7 or not code.isdigit():
@@ -487,7 +494,7 @@ def mark_municipality_failed(
 
 def retry_failed_municipality(
     municipality_code: str,
-    max_attempts: int = 3,
+    max_attempts: int = MAX_MUNICIPALITY_ATTEMPTS,
 ):
     """
     Devolve um município com falha para pending.
@@ -543,6 +550,9 @@ def recover_interrupted_municipalities(
     """
     Recupera municípios sem atividade recente.
 
+    Municípios que atingiram o limite de tentativas são marcados
+    como failed. Os demais voltam para pending.
+
     O prazo considera updated_at, permitindo que o heartbeat
     renove a reserva. O token anterior é invalidado na recuperação.
     """
@@ -571,23 +581,42 @@ def recover_interrupted_municipalities(
                 conn,
                 """
                 UPDATE municipality_discovery
-                SET status = 'pending',
-                    error = 'Execução interrompida; aguardando retomada.',
+                SET status = CASE
+                        WHEN attempts >= ? THEN 'failed'
+                        ELSE 'pending'
+                    END,
+                    error = CASE
+                        WHEN attempts >= ?
+                        THEN 'Limite de três tentativas atingido após interrupções.'
+                        ELSE 'Execução interrompida; aguardando retomada.'
+                    END,
                     started_at = NULL,
                     updated_at = ?,
                     lease_token = NULL
                 WHERE status = 'running'
                   AND updated_at < ?
                 """,
-                (now, cutoff),
+                (
+                    MAX_MUNICIPALITY_ATTEMPTS,
+                    MAX_MUNICIPALITY_ATTEMPTS,
+                    now,
+                    cutoff,
+                ),
             )
         else:
             cursor = execute(
                 conn,
                 """
                 UPDATE municipality_discovery
-                SET status = 'pending',
-                    error = 'Execução interrompida; aguardando retomada.',
+                SET status = CASE
+                        WHEN attempts >= ? THEN 'failed'
+                        ELSE 'pending'
+                    END,
+                    error = CASE
+                        WHEN attempts >= ?
+                        THEN 'Limite de três tentativas atingido após interrupções.'
+                        ELSE 'Execução interrompida; aguardando retomada.'
+                    END,
                     started_at = NULL,
                     updated_at = ?,
                     lease_token = NULL
@@ -595,7 +624,14 @@ def recover_interrupted_municipalities(
                   AND batch_index = ?
                   AND updated_at < ?
                 """,
-                (now, batch_index, cutoff),
+                (
+                    MAX_MUNICIPALITY_ATTEMPTS,
+                    MAX_MUNICIPALITY_ATTEMPTS,
+                    now,
+                    batch_index,
+                    cutoff,
+                ),
             )
 
         return cursor.rowcount
+        
