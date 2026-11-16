@@ -107,6 +107,20 @@ STATE_SEARCHES = {
     "state:TO": "Tocantins",
 }
 
+# Divisão oficial das 27 unidades federativas nas cinco grandes regiões.
+REGION_STATES = {
+    "region:norte": frozenset({"AC", "AP", "AM", "PA", "RO", "RR", "TO"}),
+    "region:nordeste": frozenset({"AL", "BA", "CE", "MA", "PB", "PE", "PI", "RN", "SE"}),
+    "region:centro-oeste": frozenset({"DF", "GO", "MT", "MS"}),
+    "region:sudeste": frozenset({"ES", "MG", "RJ", "SP"}),
+    "region:sul": frozenset({"PR", "RS", "SC"}),
+}
+
+BRAZILIAN_STATE_CODES = frozenset(
+    category.removeprefix("state:") for category in STATE_SEARCHES
+)
+
+
 
 class MunicipalityCatalogError(RuntimeError):
     """Erro ao consultar ou interpretar o cadastro municipal do IBGE."""
@@ -221,7 +235,8 @@ def load_brazilian_municipalities() -> tuple[Municipality, ...]:
             or not isinstance(name, str)
             or not name.strip()
             or not isinstance(state, str)
-            or len(state) != 2
+            or state.upper() not in BRAZILIAN_STATE_CODES
+            or len(str(code)) != 7
         ):
             raise MunicipalityCatalogError(
                 "O cadastro contém dados municipais incompletos."
