@@ -546,8 +546,8 @@ class NationalDiscoveryCoordinator:
             query_items,
             limit_per_query,
         )
-
-     def search_municipality(
+  
+    def search_municipality(
         self,
         municipality: Municipality | dict,
         limit_per_query: int = 10,
