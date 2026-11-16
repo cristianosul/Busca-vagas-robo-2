@@ -174,15 +174,15 @@ def test_register_municipality_batch_registers_at_most_60(
 
     captured = {}
 
-    def fake_register(batch_index, selected_municipalities):
-        captured["batch_index"] = batch_index
-        captured["municipalities"] = selected_municipalities
+    def fake_register(batch_index, municipalities):
+    captured["batch_index"] = batch_index
+    captured["municipalities"] = municipalities
 
-        return {
-            "batch_index": batch_index,
-            "total": len(selected_municipalities),
-            "pending": len(selected_municipalities),
-        }
+    return {
+        "batch_index": batch_index,
+        "total": len(municipalities),
+        "pending": len(municipalities),
+    }
 
     monkeypatch.setattr(
         main,
