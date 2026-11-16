@@ -10,7 +10,7 @@ permissions:
 jobs:
   ibge-live:
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 10
 
     steps:
       - name: Baixar repositorio
@@ -21,66 +21,108 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Diagnosticar conectividade com o IBGE
+      - name: Diagnosticar acesso a API e arquivos oficiais do IBGE
         continue-on-error: true
         run: |
           python - <<'PY'
           import socket
-          import urllib.error
           import urllib.request
+          import urllib.error
+          import zipfile
+          from pathlib import Path
 
-          host = "servicodados.ibge.gov.br"
-          url = (
+          api_host = "servicodados.ibge.gov.br"
+          api_url = (
               "https://servicodados.ibge.gov.br/"
               "api/v1/localidades/municipios"
           )
 
-          print("=== Diagnostico DNS ===")
-
-          try:
-              addresses = socket.getaddrinfo(
-                  host,
-                  443,
-                  type=socket.SOCK_STREAM,
-              )
-              ips = sorted({item[4][0] for item in addresses})
-              print("DNS OK:", ", ".join(ips))
-          except OSError as exc:
-              print("DNS FALHOU:", repr(exc))
-
-          print("\n=== Diagnostico TCP ===")
-
-          try:
-              with socket.create_connection(
-                  (host, 443),
-                  timeout=10,
-              ):
-                  print("TCP OK: conexao estabelecida na porta 443")
-          except OSError as exc:
-              print("TCP FALHOU:", repr(exc))
-
-          print("\n=== Diagnostico HTTPS ===")
-
-          request = urllib.request.Request(
-              url,
-              headers={
-                  "User-Agent": "BuscaVagasBot/0.1"
-              },
+          zip_url = (
+              "https://geoftp.ibge.gov.br/"
+              "organizacao_do_territorio/"
+              "estrutura_territorial/"
+              "divisao_territorial/"
+              "2025/DTB_2025.zip"
           )
 
+          print("\n=== DIAGNOSTICO DNS DA API ===")
           try:
+              addresses = socket.getaddrinfo(
+                  api_host, 443, type=socket.SOCK_STREAM
+              )
+              for address in addresses:
+                  print("Endereco:", address[4][0])
+          except Exception as exc:
+              print("Falha DNS:", repr(exc))
+
+          print("\n=== DIAGNOSTICO TCP DA API ===")
+          try:
+              with socket.create_connection(
+                  (api_host, 443), timeout=10
+              ):
+                  print("Conexao TCP com a API: SUCESSO")
+          except Exception as exc:
+              print("Conexao TCP com a API: FALHOU")
+              print(repr(exc))
+
+          print("\n=== TESTE HTTPS DA API ===")
+          try:
+              request = urllib.request.Request(
+                  api_url,
+                  headers={"User-Agent": "BuscaVagasBot/0.1"},
+              )
               with urllib.request.urlopen(
-                  request,
-                  timeout=20,
+                  request, timeout=20
               ) as response:
-                  print("HTTPS OK")
                   print("Status HTTP:", response.status)
                   print("Content-Type:", response.headers.get("Content-Type"))
                   print("Bytes recebidos:", len(response.read()))
-          except urllib.error.HTTPError as exc:
-              print("HTTPS RESPONDEU COM ERRO HTTP:", exc.code)
           except Exception as exc:
-              print("HTTPS FALHOU:", repr(exc))
+              print("HTTPS da API: FALHOU")
+              print(repr(exc))
+
+          print("\n=== TESTE DO ARQUIVO OFICIAL DTB 2025 ===")
+          zip_path = Path("DTB_2025.zip")
+
+          try:
+              request = urllib.request.Request(
+                  zip_url,
+                  headers={"User-Agent": "BuscaVagasBot/0.1"},
+              )
+
+              with urllib.request.urlopen(
+                  request, timeout=40
+              ) as response:
+                  print("Status HTTP:", response.status)
+                  print("Content-Type:", response.headers.get("Content-Type"))
+                  data = response.read()
+
+              zip_path.write_bytes(data)
+              print("Download concluido.")
+              print("Tamanho recebido:", len(data), "bytes")
+
+              with zipfile.ZipFile(zip_path) as archive:
+                  bad_file = archive.testzip()
+
+                  if bad_file:
+                      raise RuntimeError(
+                          f"Arquivo ZIP corrompido: {bad_file}"
+                      )
+
+                  print("Integridade do ZIP: OK")
+                  print("\nArquivos encontrados dentro do ZIP:")
+
+                  for item in archive.infolist():
+                      print(
+                          f"- {item.filename} "
+                          f"({item.file_size} bytes)"
+                      )
+
+          except Exception as exc:
+              print("Download ou validacao do DTB: FALHOU")
+              print(repr(exc))
+
+          print("\n=== FIM DO DIAGNOSTICO ===")
           PY
 
       - name: Instalar dependencias
