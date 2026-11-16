@@ -1,3 +1,4 @@
+
 name: Verificar catalogo nacional do IBGE
 
 on:
@@ -20,6 +21,68 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Diagnosticar conectividade com o IBGE
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import socket
+          import urllib.error
+          import urllib.request
+
+          host = "servicodados.ibge.gov.br"
+          url = (
+              "https://servicodados.ibge.gov.br/"
+              "api/v1/localidades/municipios"
+          )
+
+          print("=== Diagnostico DNS ===")
+
+          try:
+              addresses = socket.getaddrinfo(
+                  host,
+                  443,
+                  type=socket.SOCK_STREAM,
+              )
+              ips = sorted({item[4][0] for item in addresses})
+              print("DNS OK:", ", ".join(ips))
+          except OSError as exc:
+              print("DNS FALHOU:", repr(exc))
+
+          print("\n=== Diagnostico TCP ===")
+
+          try:
+              with socket.create_connection(
+                  (host, 443),
+                  timeout=10,
+              ):
+                  print("TCP OK: conexao estabelecida na porta 443")
+          except OSError as exc:
+              print("TCP FALHOU:", repr(exc))
+
+          print("\n=== Diagnostico HTTPS ===")
+
+          request = urllib.request.Request(
+              url,
+              headers={
+                  "User-Agent": "BuscaVagasBot/0.1"
+              },
+          )
+
+          try:
+              with urllib.request.urlopen(
+                  request,
+                  timeout=20,
+              ) as response:
+                  print("HTTPS OK")
+                  print("Status HTTP:", response.status)
+                  print("Content-Type:", response.headers.get("Content-Type"))
+                  print("Bytes recebidos:", len(response.read()))
+          except urllib.error.HTTPError as exc:
+              print("HTTPS RESPONDEU COM ERRO HTTP:", exc.code)
+          except Exception as exc:
+              print("HTTPS FALHOU:", repr(exc))
+          PY
+
       - name: Instalar dependencias
         run: |
           python -m pip install --upgrade pip
@@ -30,3 +93,4 @@ jobs:
         env:
           RUN_LIVE_IBGE_TESTS: "1"
         run: python -m pytest -q tests/test_ibge_live.py
+        
