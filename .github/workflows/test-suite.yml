@@ -35,5 +35,5 @@ jobs:
         env:
           DATABASE_URL: ""
         run: |
-          python -m pytest -q --durations=20
+          python -m pytest -vv --durations=20
           
