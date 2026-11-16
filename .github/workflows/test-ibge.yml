@@ -21,61 +21,17 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Diagnosticar acesso a API do IBGE
-        continue-on-error: true
+      - name: Instalar leitor da planilha
         run: |
-          python - <<'PY'
-          import socket
-          import urllib.request
+          python -m pip install --upgrade pip
+          pip install xlrd==2.0.1
 
-          host = "servicodados.ibge.gov.br"
-          url = (
-              "https://servicodados.ibge.gov.br/"
-              "api/v1/localidades/municipios"
-          )
-
-          print("=== DNS ===")
-          try:
-              for item in socket.getaddrinfo(
-                  host, 443, type=socket.SOCK_STREAM
-              ):
-                  print("Endereco:", item[4][0])
-          except Exception as exc:
-              print("Falha DNS:", repr(exc))
-
-          print("\n=== TCP ===")
-          try:
-              with socket.create_connection((host, 443), timeout=10):
-                  print("Conexao TCP: OK")
-          except Exception as exc:
-              print("Conexao TCP: FALHOU", repr(exc))
-
-          print("\n=== HTTPS ===")
-          try:
-              request = urllib.request.Request(
-                  url,
-                  headers={"User-Agent": "BuscaVagasBot/0.1"},
-              )
-              with urllib.request.urlopen(request, timeout=20) as response:
-                  print("HTTP:", response.status)
-                  print("Content-Type:", response.headers.get("Content-Type"))
-          except Exception as exc:
-              print("HTTPS: FALHOU", repr(exc))
-          PY
-
-      - name: Baixar e converter catalogo oficial DTB 2025
+      - name: Inspecionar planilha oficial de municipios
         run: |
-          python -m pip install xlrd==2.0.1
-
           python - <<'PY'
           import io
-          import json
-          import re
-          import unicodedata
           import urllib.request
           import zipfile
-          from pathlib import Path
-
           import xlrd
 
           ZIP_URL = (
@@ -87,42 +43,8 @@ jobs:
           )
 
           XLS_NAME = "RELATORIO_DTB_BRASIL_2025_MUNICIPIOS.xls"
-          OUTPUT = Path("data/ibge/municipios.json")
 
-          def normalize(value):
-              value = str(value or "").strip().lower()
-              value = unicodedata.normalize("NFKD", value)
-              value = "".join(
-                  char for char in value
-                  if not unicodedata.combining(char)
-              )
-              return re.sub(r"[^a-z0-9]+", "_", value).strip("_")
-
-          def cell_value(cell, datemode):
-              if cell.ctype == xlrd.XL_CELL_EMPTY:
-                  return None
-
-              if cell.ctype == xlrd.XL_CELL_DATE:
-                  return xlrd.xldate.xldate_as_datetime(
-                      cell.value, datemode
-                  ).isoformat()
-
-              if cell.ctype == xlrd.XL_CELL_NUMBER:
-                  number = float(cell.value)
-                  if number.is_integer():
-                      return int(number)
-                  return number
-
-              if cell.ctype == xlrd.XL_CELL_BOOLEAN:
-                  return bool(cell.value)
-
-              if cell.ctype == xlrd.XL_CELL_ERROR:
-                  return None
-
-              value = str(cell.value).strip()
-              return value if value else None
-
-          print("Baixando arquivo oficial DTB 2025...")
+          print("Baixando catalogo oficial DTB 2025...")
 
           request = urllib.request.Request(
               ZIP_URL,
@@ -130,220 +52,81 @@ jobs:
           )
 
           with urllib.request.urlopen(request, timeout=60) as response:
-              if response.status != 200:
-                  raise RuntimeError(
-                      f"Download retornou HTTP {response.status}"
-                  )
+              print("HTTP:", response.status)
               zip_data = response.read()
 
-          print("Download:", len(zip_data), "bytes")
+          print("Bytes recebidos:", len(zip_data))
 
           with zipfile.ZipFile(io.BytesIO(zip_data)) as archive:
               bad_file = archive.testzip()
+
               if bad_file:
                   raise RuntimeError(
                       f"Arquivo ZIP corrompido: {bad_file}"
                   )
 
-              names = archive.namelist()
               matches = [
-                  name for name in names
+                  name for name in archive.namelist()
                   if name.endswith(XLS_NAME)
               ]
 
               if len(matches) != 1:
                   raise RuntimeError(
-                      "Planilha de municipios nao encontrada "
-                      f"ou encontrada mais de uma vez: {matches}"
+                      f"Planilha nao encontrada: {matches}"
                   )
 
               xls_data = archive.read(matches[0])
-
-          print("Planilha encontrada:", XLS_NAME)
 
           workbook = xlrd.open_workbook(
               file_contents=xls_data,
               on_demand=False,
           )
 
-          selected = None
+          print("\n=== ABAS DA PLANILHA ===")
 
           for sheet in workbook.sheets():
-              for row_index in range(min(sheet.nrows, 40)):
-                  headers = [
-                      normalize(sheet.cell_value(row_index, col))
-                      for col in range(sheet.ncols)
-                  ]
-
-                  name_columns = [
-                      index for index, header in enumerate(headers)
-                      if "municipio" in header
-                      and not any(
-                          token in header
-                          for token in ("codigo", "cod_")
-                      )
-                  ]
-
-                  code_columns = [
-                      index for index, header in enumerate(headers)
-                      if "municipio" in header
-                      and (
-                          "codigo" in header
-                          or header.startswith("cod_")
-                      )
-                  ]
-
-                  if name_columns and code_columns:
-                      selected = (
-                          sheet,
-                          row_index,
-                          headers,
-                          name_columns[0],
-                          code_columns[0],
-                      )
-                      break
-
-              if selected:
-                  break
-
-          if not selected:
-              print("Planilhas e primeiras linhas para diagnostico:")
-              for sheet in workbook.sheets():
-                  print("Aba:", sheet.name)
-                  for row_index in range(min(sheet.nrows, 12)):
-                      print(
-                          row_index,
-                          [
-                              sheet.cell_value(row_index, col)
-                              for col in range(min(sheet.ncols, 20))
-                          ],
-                      )
-              raise RuntimeError(
-                  "Nao foi possivel identificar automaticamente "
-                  "as colunas de nome e codigo do municipio."
+              print(
+                  f"Aba: {sheet.name} | "
+                  f"Linhas: {sheet.nrows} | "
+                  f"Colunas: {sheet.ncols}"
               )
 
-          sheet, header_row, headers, name_col, code_col = selected
+          sheet = workbook.sheet_by_name("DTB_Municípios")
 
-          print("Aba selecionada:", sheet.name)
-          print("Linha dos cabecalhos:", header_row + 1)
-          print("Coluna do municipio:", headers[name_col])
-          print("Coluna do codigo:", headers[code_col])
+          print("\n=== PRIMEIRAS 15 LINHAS ORIGINAIS ===")
+          print("Aba:", sheet.name)
 
-          unique_headers = []
-          occurrences = {}
+          for row_index in range(min(15, sheet.nrows)):
+              print(f"\nLINHA {row_index + 1}:")
 
-          for index, header in enumerate(headers):
-              key = header or f"coluna_{index + 1}"
-              occurrences[key] = occurrences.get(key, 0) + 1
+              for col_index in range(sheet.ncols):
+                  cell = sheet.cell(row_index, col_index)
+                  value = cell.value
 
-              if occurrences[key] > 1:
-                  key = f"{key}_{occurrences[key]}"
+                  print(
+                      f"Coluna {col_index + 1}: "
+                      f"valor={value!r} | "
+                      f"tipo={cell.ctype}"
+                  )
 
-              unique_headers.append(key)
+          print("\n=== RESUMO DOS CABECALHOS ===")
 
-          municipalities = []
-          seen_codes = set()
-
-          for row_index in range(header_row + 1, sheet.nrows):
+          for row_index in range(min(15, sheet.nrows)):
               values = [
-                  cell_value(sheet.cell(row_index, col), workbook.datemode)
+                  str(sheet.cell_value(row_index, col)).strip()
                   for col in range(sheet.ncols)
               ]
 
-              raw_name = values[name_col]
-              raw_code = values[code_col]
-
-              if raw_name is None or raw_code is None:
-                  continue
-
-              name = str(raw_name).strip()
-
-              if isinstance(raw_code, (int, float)):
-                  if not float(raw_code).is_integer():
-                      continue
-                  code = str(int(raw_code))
-              else:
-                  code = re.sub(r"\.0$", "", str(raw_code).strip())
-                  code = re.sub(r"\D", "", code)
-
-              if not re.fullmatch(r"\d{7}", code):
-                  continue
-
-              if code in seen_codes:
-                  raise RuntimeError(
-                      f"Codigo municipal duplicado: {code}"
-                  )
-
-              seen_codes.add(code)
-
-              original_data = {
-                  unique_headers[index]: value
-                  for index, value in enumerate(values)
-                  if value is not None
-              }
-
-              municipalities.append({
-                  "codigo_ibge": code,
-                  "municipio": name,
-                  "dados_originais": original_data,
-              })
-
-          if len(municipalities) < 5000:
-              raise RuntimeError(
-                  "Quantidade inesperada de municipios: "
-                  f"{len(municipalities)}"
-              )
-
-          OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-
-          catalog = {
-              "fonte": "IBGE - Divisao Territorial Brasileira",
-              "ano_referencia": 2025,
-              "arquivo_origem": XLS_NAME,
-              "aba_origem": sheet.name,
-              "total_municipios": len(municipalities),
-              "municipios": municipalities,
-          }
-
-          OUTPUT.write_text(
-              json.dumps(
-                  catalog,
-                  ensure_ascii=False,
-                  indent=2,
-              ) + "\n",
-              encoding="utf-8",
-          )
-
-          print("\n=== VALIDACAO DO CATALOGO ===")
-          print("Total de municipios:", len(municipalities))
-          print("Codigos unicos:", len(seen_codes))
-          print("Arquivo gerado:", OUTPUT)
-          print("Tamanho JSON:", OUTPUT.stat().st_size, "bytes")
-
-          print("\nPrimeiros cinco registros:")
-          for item in municipalities[:5]:
               print(
-                  item["codigo_ibge"],
-                  "-",
-                  item["municipio"],
+                  f"Linha {row_index + 1}: "
+                  + " | ".join(values)
               )
 
-          print("\nCatalogo JSON gerado com sucesso.")
+          print("\n=== FIM DA INSPECAO ===")
           PY
-
-      - name: Disponibilizar catalogo JSON
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: catalogo-municipios-ibge-2025
-          path: data/ibge/municipios.json
-          if-no-files-found: warn
-          retention-days: 30
 
       - name: Instalar dependencias do projeto
         run: |
-          python -m pip install --upgrade pip
           pip install -r requirements.txt
           pip install pytest
 
