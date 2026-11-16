@@ -547,7 +547,84 @@ class NationalDiscoveryCoordinator:
             limit_per_query,
         )
 
-    def search_company(
+     def search_municipality(
+        self,
+        municipality: Municipality | dict,
+        limit_per_query: int = 10,
+    ):
+        """Pesquisa oportunidades em um único município brasileiro."""
+
+        self._validate_limit(limit_per_query)
+
+        if isinstance(municipality, Municipality):
+            code = municipality.code
+            name = municipality.name
+            state = municipality.state
+
+        elif isinstance(municipality, dict):
+            code = municipality.get("code")
+            name = municipality.get("name")
+            state = municipality.get("state")
+
+        else:
+            raise ValueError(
+                "Informe um município válido."
+            )
+
+        if (
+            not isinstance(code, str)
+            or len(code) != 7
+            or not code.isdigit()
+        ):
+            raise ValueError(
+                "O código do município deve conter 7 dígitos."
+            )
+
+        if (
+            not isinstance(name, str)
+            or not name.strip()
+        ):
+            raise ValueError(
+                "O nome do município é obrigatório."
+            )
+
+        if (
+            not isinstance(state, str)
+            or len(state) != 2
+            or not state.isalpha()
+        ):
+            raise ValueError(
+                "A UF do município deve conter duas letras."
+            )
+
+        name = name.strip()
+        state = state.upper()
+
+        query = (
+            "vagas de emprego empresas contratando agências de emprego "
+            f"SINE {name} {state}"
+        )
+
+        if len(query) > MAX_QUERY_LENGTH:
+            raise ValueError(
+                "A consulta municipal ultrapassou o limite permitido."
+            )
+
+        query_items = (
+            (
+                f"municipality:{state}",
+                query,
+                name,
+                state,
+            ),
+        )
+
+        return self._run_queries(
+            query_items,
+            limit_per_query,
+        )
+        
+     def search_company(
         self,
         company_name: str,
         limit_per_query: int = 10,
