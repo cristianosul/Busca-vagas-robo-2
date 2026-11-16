@@ -1,10 +1,16 @@
 
+import json
 from types import SimpleNamespace
 
 import pytest
 
 import app.national_discovery as national_discovery
 from app.search_engine import SearchProviderError
+
+
+# ============================================================
+# Mecanismo de pesquisa simulado
+# ============================================================
 
 
 class FakeSearchEngine:
@@ -38,6 +44,17 @@ def fake_engine_class(monkeypatch):
     return FakeSearchEngine
 
 
+@pytest.fixture(autouse=True)
+def clear_municipality_cache():
+    """Evita que o cache de um teste interfira em outro."""
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+    yield
+
+    national_discovery.load_brazilian_municipalities.cache_clear()
+
+
 def make_result(url, title="Vagas", snippet="Oportunidades"):
     return SimpleNamespace(
         url=url,
@@ -46,8 +63,122 @@ def make_result(url, title="Vagas", snippet="Oportunidades"):
     )
 
 
+# ============================================================
+# Catálogo municipal local
+# ============================================================
+
+
+UF_CODES = {
+    "RO": 11,
+    "AC": 12,
+    "AM": 13,
+    "RR": 14,
+    "PA": 15,
+    "AP": 16,
+    "TO": 17,
+    "MA": 21,
+    "PI": 22,
+    "CE": 23,
+    "RN": 24,
+    "PB": 25,
+    "PE": 26,
+    "AL": 27,
+    "SE": 28,
+    "BA": 29,
+    "MG": 31,
+    "ES": 32,
+    "RJ": 33,
+    "SP": 35,
+    "PR": 41,
+    "SC": 42,
+    "RS": 43,
+    "MS": 50,
+    "MT": 51,
+    "GO": 52,
+    "DF": 53,
+}
+
+
+def make_catalog_municipality(
+    code,
+    name,
+    state,
+    *,
+    uf_code=None,
+):
+    """Cria um registro no formato do catálogo oficial local."""
+
+    code = str(code)
+    uf_code = UF_CODES.get(state) if uf_code is None else uf_code
+
+    return {
+        "codigo_ibge": code,
+        "municipio": name,
+        "codigo_uf": uf_code,
+        "uf": state,
+        "codigo_regiao_intermediaria": "4301",
+        "regiao_intermediaria": "Região Intermediária de Teste",
+        "codigo_regiao_imediata": "430001",
+        "regiao_imediata": "Região Imediata de Teste",
+        "codigo_municipio": code[-5:],
+    }
+
+
+def make_catalog_payload(municipalities):
+    return {
+        "fonte": "IBGE",
+        "ano": 2025,
+        "total_municipios": len(municipalities),
+        "municipios": municipalities,
+    }
+
+
+def write_catalog(tmp_path, monkeypatch, municipalities):
+    """Grava um catálogo sintético e aponta o loader para ele."""
+
+    catalog_path = tmp_path / "municipios.json"
+    payload = make_catalog_payload(municipalities)
+
+    catalog_path.write_text(
+        json.dumps(payload, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    # O arquivo de produção deverá definir esta constante.
+    # raising=False permite preparar o teste antes da implementação.
+    monkeypatch.setattr(
+        national_discovery,
+        "MUNICIPALITIES_CATALOG_PATH",
+        catalog_path,
+        raising=False,
+    )
+
+    return catalog_path
+
+
+def make_rs_catalog(count):
+    """Gera registros sintéticos com códigos municipais de sete dígitos."""
+
+    return [
+        make_catalog_municipality(
+            f"43{index:05d}",
+            f"Municipio {index:03d}",
+            "RS",
+        )
+        for index in range(count)
+    ]
+
+
+# ============================================================
+# Consultas nacionais
+# ============================================================
+
+
 def test_build_national_queries_includes_all_categories():
-    queries = national_discovery.NationalDiscoveryCoordinator.build_national_queries()
+    queries = (
+        national_discovery.NationalDiscoveryCoordinator
+        .build_national_queries()
+    )
 
     assert len(queries) == 12
     assert len(queries) == len(set(queries))
@@ -69,8 +200,9 @@ def test_build_national_queries_includes_all_categories():
     ],
 )
 def test_build_national_queries_accepts_each_category(category):
-    queries = national_discovery.NationalDiscoveryCoordinator.build_national_queries(
-        [category]
+    queries = (
+        national_discovery.NationalDiscoveryCoordinator
+        .build_national_queries([category])
     )
 
     assert queries
@@ -80,8 +212,9 @@ def test_build_national_queries_accepts_each_category(category):
 
 
 def test_build_national_queries_removes_repeated_categories():
-    queries = national_discovery.NationalDiscoveryCoordinator.build_national_queries(
-        ["companies", "companies"]
+    queries = (
+        national_discovery.NationalDiscoveryCoordinator
+        .build_national_queries(["companies", "companies"])
     )
 
     assert queries == list(
@@ -125,9 +258,9 @@ def test_search_national_returns_results(fake_engine_class):
         "https://empresa.example/carreiras"
     )
 
-    engine = fake_engine_class(
-        {query: [expected_result]}
-    )
+    engine = fake_engine_class({
+        query: [expected_result],
+    })
 
     coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
 
@@ -154,12 +287,10 @@ def test_search_national_removes_duplicate_urls(fake_engine_class):
         "https://empresa.example/vagas"
     )
 
-    engine = fake_engine_class(
-        {
-            queries[0]: [first_result],
-            queries[1]: [second_result],
-        }
-    )
+    engine = fake_engine_class({
+        queries[0]: [first_result],
+        queries[1]: [second_result],
+    })
 
     coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
 
@@ -171,21 +302,17 @@ def test_search_national_removes_duplicate_urls(fake_engine_class):
     assert report.results[0] == first_result
 
 
-def test_search_national_continues_after_provider_failure(
-    fake_engine_class,
-):
+def test_search_national_continues_after_provider_failure(fake_engine_class):
     queries = national_discovery.NATIONAL_SEARCHES["companies"]
 
     expected_result = make_result(
         "https://empresa.example/carreiras"
     )
 
-    engine = fake_engine_class(
-        {
-            queries[0]: SearchProviderError("Falha simulada"),
-            queries[1]: [expected_result],
-        }
-    )
+    engine = fake_engine_class({
+        queries[0]: SearchProviderError("Falha simulada"),
+        queries[1]: [expected_result],
+    })
 
     coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
 
@@ -218,6 +345,11 @@ def test_search_national_validates_limit(fake_engine_class):
     assert engine.calls == []
 
 
+# ============================================================
+# Pesquisa por empresa e inspeção de página oficial
+# ============================================================
+
+
 def test_search_company_uses_company_queries(
     fake_engine_class,
     monkeypatch,
@@ -237,11 +369,9 @@ def test_search_company_uses_company_queries(
         lambda company_name: company_queries,
     )
 
-    engine = fake_engine_class(
-        {
-            company_queries[0]: [expected_result],
-        }
-    )
+    engine = fake_engine_class({
+        company_queries[0]: [expected_result],
+    })
 
     coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
 
@@ -259,9 +389,7 @@ def test_search_company_uses_company_queries(
     ]
 
 
-def test_inspect_official_site_delegates_to_company_discovery(
-    monkeypatch,
-):
+def test_inspect_official_site_delegates_to_company_discovery(monkeypatch):
     expected_pages = [
         national_discovery.CareerPageCandidate(
             company_name="Empresa Exemplo",
@@ -283,9 +411,12 @@ def test_inspect_official_site_delegates_to_company_discovery(
         fake_discover,
     )
 
-    result = national_discovery.NationalDiscoveryCoordinator.inspect_official_site(
-        "Empresa Exemplo",
-        "https://empresa.example",
+    result = (
+        national_discovery.NationalDiscoveryCoordinator
+        .inspect_official_site(
+            "Empresa Exemplo",
+            "https://empresa.example",
+        )
     )
 
     assert result == expected_pages
@@ -293,7 +424,7 @@ def test_inspect_official_site_delegates_to_company_discovery(
         "company_name": "Empresa Exemplo",
         "official_site_url": "https://empresa.example",
     }
-    
+
 
 def test_search_national_records_category_and_query(fake_engine_class):
     query = national_discovery.NATIONAL_SEARCHES["companies"][0]
@@ -344,10 +475,7 @@ def test_search_national_preserves_duplicate_origins(fake_engine_class):
         categories=["companies"],
     )
 
-    # A lista principal continua eliminando duplicidades.
     assert len(report.results) == 1
-
-    # O histórico preserva as duas descobertas.
     assert len(report.matches) == 2
 
     assert report.matches[0].category == "companies"
@@ -401,9 +529,7 @@ def test_search_company_records_company_category(
     assert match.result == result
 
 
-def test_national_report_preserves_results_compatibility(
-    fake_engine_class,
-):
+def test_national_report_preserves_results_compatibility(fake_engine_class):
     query = national_discovery.NATIONAL_SEARCHES["companies"][0]
 
     result = make_result(
@@ -426,70 +552,52 @@ def test_national_report_preserves_results_compatibility(
     assert report.matches[0].result is result
 
 
-def make_ibge_municipality(code, name, state):
-    return {
-        "id": code,
-        "nome": name,
-        "regiao-imediata": {
-            "regiao-intermediaria": {
-                "UF": {
-                    "sigla": state,
-                }
-            }
-        },
-    }
+# ============================================================
+# Carregamento do catálogo municipal JSON local
+# ============================================================
 
 
-def mock_ibge_response(monkeypatch, municipalities):
-    class FakeResponse:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return municipalities
-
-    monkeypatch.setattr(
-        national_discovery.httpx,
-        "get",
-        lambda *args, **kwargs: FakeResponse(),
-    )
-
-
-def test_load_brazilian_municipalities(monkeypatch):
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
+def test_load_brazilian_municipalities(tmp_path, monkeypatch):
     payload = [
-        make_ibge_municipality(4300034, "Aceguá", "RS"),
-        make_ibge_municipality(4300059, "Água Santa", "RS"),
-        make_ibge_municipality(3550308, "São Paulo", "SP"),
+        make_catalog_municipality("4300034", "Aceguá", "RS"),
+        make_catalog_municipality("4300059", "Água Santa", "RS"),
+        make_catalog_municipality("3550308", "São Paulo", "SP"),
     ]
 
-    mock_ibge_response(monkeypatch, payload)
+    write_catalog(tmp_path, monkeypatch, payload)
 
     municipalities = (
         national_discovery.load_brazilian_municipalities()
     )
 
     assert len(municipalities) == 3
-    assert municipalities[0].code == "4300034"
-    assert municipalities[0].name == "Aceguá"
-    assert municipalities[0].state == "RS"
 
-    national_discovery.load_brazilian_municipalities.cache_clear()
+    by_code = {
+        municipality.code: municipality
+        for municipality in municipalities
+    }
+
+    assert by_code["4300034"].name == "Aceguá"
+    assert by_code["4300034"].state == "RS"
+
+    assert by_code["4300059"].name == "Água Santa"
+    assert by_code["4300059"].state == "RS"
+
+    assert by_code["3550308"].name == "São Paulo"
+    assert by_code["3550308"].state == "SP"
 
 
 def test_load_municipalities_preserves_small_interior_cities(
+    tmp_path,
     monkeypatch,
 ):
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
     payload = [
-        make_ibge_municipality(4300034, "Aceguá", "RS"),
-        make_ibge_municipality(4300059, "Água Santa", "RS"),
-        make_ibge_municipality(4300109, "Agudo", "RS"),
+        make_catalog_municipality("4300034", "Aceguá", "RS"),
+        make_catalog_municipality("4300059", "Água Santa", "RS"),
+        make_catalog_municipality("4300109", "Agudo", "RS"),
     ]
 
-    mock_ibge_response(monkeypatch, payload)
+    write_catalog(tmp_path, monkeypatch, payload)
 
     queries = national_discovery.build_municipal_queries(0)
 
@@ -502,22 +610,13 @@ def test_load_municipalities_preserves_small_interior_cities(
     assert "Água Santa" in municipality_names
     assert "Agudo" in municipality_names
 
-    national_discovery.load_brazilian_municipalities.cache_clear()
-    
-    
-def test_municipal_queries_are_divided_into_batches(monkeypatch):
-    national_discovery.load_brazilian_municipalities.cache_clear()
 
-    payload = [
-        make_ibge_municipality(
-            4300000 + index,
-            f"Municipio {index:03d}",
-            "RS",
-        )
-        for index in range(121)
-    ]
-
-    mock_ibge_response(monkeypatch, payload)
+def test_municipal_queries_are_divided_into_batches(
+    tmp_path,
+    monkeypatch,
+):
+    payload = make_rs_catalog(121)
+    write_catalog(tmp_path, monkeypatch, payload)
 
     first_batch = national_discovery.build_municipal_queries(0)
     second_batch = national_discovery.build_municipal_queries(1)
@@ -539,36 +638,26 @@ def test_municipal_queries_are_divided_into_batches(monkeypatch):
 
     assert first_codes.isdisjoint(second_codes)
 
-    national_discovery.load_brazilian_municipalities.cache_clear()
 
-
-def test_municipality_batch_count(monkeypatch):
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
-    payload = [
-        make_ibge_municipality(
-            4300000 + index,
-            f"Municipio {index:03d}",
-            "RS",
-        )
-        for index in range(121)
-    ]
-
-    mock_ibge_response(monkeypatch, payload)
+def test_municipality_batch_count(tmp_path, monkeypatch):
+    write_catalog(
+        tmp_path,
+        monkeypatch,
+        make_rs_catalog(121),
+    )
 
     assert national_discovery.municipality_batch_count() == 3
 
-    national_discovery.load_brazilian_municipalities.cache_clear()
 
-
-def test_municipal_queries_reject_invalid_batch(monkeypatch):
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
+def test_municipal_queries_reject_invalid_batch(
+    tmp_path,
+    monkeypatch,
+):
     payload = [
-        make_ibge_municipality(4300034, "Aceguá", "RS"),
+        make_catalog_municipality("4300034", "Aceguá", "RS"),
     ]
 
-    mock_ibge_response(monkeypatch, payload)
+    write_catalog(tmp_path, monkeypatch, payload)
 
     with pytest.raises(ValueError):
         national_discovery.build_municipal_queries(-1)
@@ -579,28 +668,29 @@ def test_municipal_queries_reject_invalid_batch(monkeypatch):
     with pytest.raises(ValueError):
         national_discovery.build_municipal_queries(1)
 
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
 
 def test_search_municipalities_records_city_and_state(
     fake_engine_class,
+    tmp_path,
     monkeypatch,
 ):
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
     payload = [
-        make_ibge_municipality(4300034, "Aceguá", "RS"),
+        make_catalog_municipality("4300034", "Aceguá", "RS"),
     ]
 
-    mock_ibge_response(monkeypatch, payload)
+    write_catalog(tmp_path, monkeypatch, payload)
 
     result = make_result(
         "https://empresa.example/vagas"
     )
 
-    engine = fake_engine_class({
+    query = (
         "vagas de emprego empresas contratando agências de emprego "
-        "SINE Aceguá RS": [result],
+        "SINE Aceguá RS"
+    )
+
+    engine = fake_engine_class({
+        query: [result],
     })
 
     coordinator = national_discovery.NationalDiscoveryCoordinator(
@@ -618,659 +708,102 @@ def test_search_municipalities_records_city_and_state(
     assert match.state == "RS"
     assert match.result == result
 
-    national_discovery.load_brazilian_municipalities.cache_clear()
 
-
-def test_ibge_invalid_response_raises_catalog_error(monkeypatch):
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
-    class FakeResponse:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            raise ValueError("JSON inválido")
-
-    monkeypatch.setattr(
-        national_discovery.httpx,
-        "get",
-        lambda *args, **kwargs: FakeResponse(),
-    )
-
-    with pytest.raises(
-        national_discovery.MunicipalityCatalogError
-    ):
-        national_discovery.load_brazilian_municipalities()
-
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
-
-def test_ibge_empty_catalog_raises_error(monkeypatch):
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
-    mock_ibge_response(monkeypatch, [])
-
-    with pytest.raises(
-        national_discovery.MunicipalityCatalogError
-    ):
-        national_discovery.load_brazilian_municipalities()
-
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
-
-def test_ibge_cache_avoids_repeated_requests(monkeypatch):
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
+def test_catalog_cache_avoids_repeated_file_reads(
+    tmp_path,
+    monkeypatch,
+):
     payload = [
-        make_ibge_municipality(4300034, "Aceguá", "RS"),
+        make_catalog_municipality("4300034", "Aceguá", "RS"),
     ]
 
-    calls = {"count": 0}
-
-    class FakeResponse:
-        def raise_for_status(self):
-            pass
-
-        def json(self):
-            return payload
-
-    def fake_get(*args, **kwargs):
-        calls["count"] += 1
-        return FakeResponse()
-
-    monkeypatch.setattr(
-        national_discovery.httpx,
-        "get",
-        fake_get,
-    )
+    write_catalog(tmp_path, monkeypatch, payload)
 
     first = national_discovery.load_brazilian_municipalities()
+    cache_after_first = (
+        national_discovery.load_brazilian_municipalities.cache_info()
+    )
+
     second = national_discovery.load_brazilian_municipalities()
+    cache_after_second = (
+        national_discovery.load_brazilian_municipalities.cache_info()
+    )
 
     assert first == second
-    assert calls["count"] == 1
+    assert cache_after_first.misses == 1
+    assert cache_after_second.misses == 1
+    assert cache_after_second.hits == cache_after_first.hits + 1
 
-    national_discovery.load_brazilian_municipalities.cache_clear()
-    
 
-def test_all_municipal_batches_cover_catalog_without_duplicates(
+def test_missing_catalog_raises_catalog_error(tmp_path, monkeypatch):
+    missing_path = tmp_path / "municipios.json"
+
+    monkeypatch.setattr(
+        national_discovery,
+        "MUNICIPALITIES_CATALOG_PATH",
+        missing_path,
+        raising=False,
+    )
+
+    with pytest.raises(
+        national_discovery.MunicipalityCatalogError
+    ):
+        national_discovery.load_brazilian_municipalities()
+
+
+def test_corrupted_catalog_json_raises_catalog_error(
+    tmp_path,
     monkeypatch,
 ):
-    national_discovery.load_brazilian_municipalities.cache_clear()
+    catalog_path = tmp_path / "municipios.json"
 
-    payload = [
-        make_ibge_municipality(
-            4300000 + index,
-            f"Municipio {index:03d}",
-            "RS",
-        )
-        for index in range(121)
-    ]
+    catalog_path.write_text(
+        '{"municipios": [',
+        encoding="utf-8",
+    )
 
-    mock_ibge_response(monkeypatch, payload)
+    monkeypatch.setattr(
+        national_discovery,
+        "MUNICIPALITIES_CATALOG_PATH",
+        catalog_path,
+        raising=False,
+    )
 
-    batch_count = national_discovery.municipality_batch_count()
-
-    all_batches = [
-        national_discovery.build_municipal_queries(batch_index)
-        for batch_index in range(batch_count)
-    ]
-
-    all_names = [
-        item[2]
-        for batch in all_batches
-        for item in batch
-    ]
-
-    expected_names = {
-        f"Municipio {index:03d}"
-        for index in range(121)
-    }
-
-    assert len(all_names) == 121
-    assert len(set(all_names)) == 121
-    assert set(all_names) == expected_names
-
-    national_discovery.load_brazilian_municipalities.cache_clear()
+    with pytest.raises(
+        national_discovery.MunicipalityCatalogError
+    ):
+        national_discovery.load_brazilian_municipalities()
 
 
-def test_last_municipality_batch_contains_remaining_city(
-    monkeypatch,
-):
-    national_discovery.load_brazilian_municipalities.cache_clear()
+def test_empty_catalog_raises_catalog_error(tmp_path, monkeypatch):
+    write_catalog(
+        tmp_path,
+        monkeypatch,
+        [],
+    )
 
-    payload = [
-        make_ibge_municipality(
-            4300000 + index,
-            f"Municipio {index:03d}",
-            "RS",
-        )
-        for index in range(61)
-    ]
-
-    mock_ibge_response(monkeypatch, payload)
-
-    first_batch = national_discovery.build_municipal_queries(0)
-    last_batch = national_discovery.build_municipal_queries(1)
-
-    assert len(first_batch) == 60
-    assert len(last_batch) == 1
-    assert last_batch[0][2] == "Municipio 060"
-
-    national_discovery.load_brazilian_municipalities.cache_clear()
+    with pytest.raises(
+        national_discovery.MunicipalityCatalogError
+    ):
+        national_discovery.load_brazilian_municipalities()
 
 
 @pytest.mark.parametrize(
     "invalid_payload",
     [
-        [
-            {
-                "id": 4300001,
-                "nome": "Cidade sem UF",
-            }
-        ],
-        [
-            make_ibge_municipality(
-                "codigo-invalido",
-                "Cidade com código inválido",
-                "RS",
-            )
-        ],
-        [
-            make_ibge_municipality(
-                4300001,
-                "",
-                "RS",
-            )
-        ],
-        [
-            "registro inválido",
-        ],
+        [],
+        {"erro": "resposta inválida"},
+        {"municipios": None},
+        {"municipios": "não é uma lista"},
+        {"municipios": []},
     ],
 )
-def test_ibge_rejects_incomplete_or_invalid_municipalities(
+def test_catalog_rejects_invalid_root_structure(
+    tmp_path,
     monkeypatch,
     invalid_payload,
 ):
-    national_discovery.load_brazilian_municipalities.cache_clear()
+    catalog_path = tmp_path / "municipios.json"
 
-    mock_ibge_response(monkeypatch, invalid_payload)
-
-    with pytest.raises(
-        national_discovery.MunicipalityCatalogError
-    ):
-        national_discovery.load_brazilian_municipalities()
-
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
-
-def test_ibge_rejects_non_list_catalog(monkeypatch):
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
-    mock_ibge_response(
-        monkeypatch,
-        {"erro": "resposta inválida"},
-    )
-
-    with pytest.raises(
-        national_discovery.MunicipalityCatalogError
-    ):
-        national_discovery.load_brazilian_municipalities()
-
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
-
-def test_ibge_deduplicates_repeated_municipality_codes(monkeypatch):
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
-    payload = [
-        make_ibge_municipality(4300034, "Aceguá", "RS"),
-        make_ibge_municipality(4300034, "Aceguá Duplicado", "RS"),
-        make_ibge_municipality(4300059, "Água Santa", "RS"),
-    ]
-
-    mock_ibge_response(monkeypatch, payload)
-
-    municipalities = (
-        national_discovery.load_brazilian_municipalities()
-    )
-
-    codes = [municipality.code for municipality in municipalities]
-
-    assert len(codes) == len(set(codes))
-    assert len(municipalities) == 2
-    assert "Aceguá Duplicado" not in {
-        municipality.name for municipality in municipalities
-    }
-
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
-
-def test_load_municipalities_supports_legacy_ibge_structure(
-    monkeypatch,
-):
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
-    payload = [
-        {
-            "id": 4300034,
-            "nome": "Aceguá",
-            "microrregiao": {
-                "mesorregiao": {
-                    "UF": {
-                        "sigla": "RS",
-                    }
-                }
-            },
-        },
-    ]
-
-    mock_ibge_response(monkeypatch, payload)
-
-    municipalities = (
-        national_discovery.load_brazilian_municipalities()
-    )
-
-    assert len(municipalities) == 1
-    assert municipalities[0].code == "4300034"
-    assert municipalities[0].name == "Aceguá"
-    assert municipalities[0].state == "RS"
-
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
-
-def test_ibge_connection_failure_raises_catalog_error(monkeypatch):
-    import httpx
-
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
-    def fake_get(*args, **kwargs):
-        raise httpx.ConnectError("Falha de conexão simulada")
-
-    monkeypatch.setattr(
-        national_discovery.httpx,
-        "get",
-        fake_get,
-    )
-
-    with pytest.raises(
-        national_discovery.MunicipalityCatalogError
-    ):
-        national_discovery.load_brazilian_municipalities()
-
-    national_discovery.load_brazilian_municipalities.cache_clear()
-    
-    
-def test_search_municipality_accepts_municipality_object(
-    fake_engine_class,
-):
-    municipality = national_discovery.Municipality(
-        code="4300034",
-        name="Aceguá",
-        state="RS",
-    )
-
-    result = make_result("https://empresa.example/vagas")
-    engine = fake_engine_class({
-        "vagas de emprego empresas contratando agências de emprego "
-        "SINE Aceguá RS": [result],
-    })
-
-    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
-
-    report = coordinator.search_municipality(municipality)
-
-    assert report.results == (result,)
-    assert len(engine.calls) == 1
-
-
-def test_search_municipality_accepts_dictionary(
-    fake_engine_class,
-):
-    municipality = {
-        "code": "4300034",
-        "name": "Aceguá",
-        "state": "RS",
-    }
-
-    result = make_result("https://empresa.example/vagas")
-    engine = fake_engine_class({
-        "vagas de emprego empresas contratando agências de emprego "
-        "SINE Aceguá RS": [result],
-    })
-
-    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
-
-    report = coordinator.search_municipality(municipality)
-
-    assert report.results == (result,)
-
-
-def test_search_municipality_executes_only_one_query(
-    fake_engine_class,
-):
-    municipality = {
-        "code": "4300034",
-        "name": "Aceguá",
-        "state": "RS",
-    }
-
-    engine = fake_engine_class()
-    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
-
-    report = coordinator.search_municipality(municipality)
-
-    assert len(engine.calls) == 1
-    assert len(report.queries) == 1
-    assert engine.calls[0][1] == 10
-
-
-def test_search_municipality_records_city_and_state(
-    fake_engine_class,
-):
-    municipality = {
-        "code": "4300034",
-        "name": "Aceguá",
-        "state": "rs",
-    }
-
-    result = make_result("https://empresa.example/vagas")
-    engine = fake_engine_class({
-        "vagas de emprego empresas contratando agências de emprego "
-        "SINE Aceguá RS": [result],
-    })
-
-    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
-
-    report = coordinator.search_municipality(municipality)
-
-    assert len(report.matches) == 1
-
-    match = report.matches[0]
-
-    assert match.category == "municipality:RS"
-    assert match.municipality == "Aceguá"
-    assert match.state == "RS"
-    assert match.result == result
-
-
-@pytest.mark.parametrize(
-    "code",
-    [
-        "123",
-        "abcdefg",
-        4300034,
-        "",
-    ],
-)
-def test_search_municipality_rejects_invalid_code(
-    fake_engine_class,
-    code,
-):
-    municipality = {
-        "code": code,
-        "name": "Aceguá",
-        "state": "RS",
-    }
-
-    engine = fake_engine_class()
-    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
-
-    with pytest.raises(ValueError):
-        coordinator.search_municipality(municipality)
-
-    assert engine.calls == []
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "",
-        "   ",
-        None,
-        123,
-    ],
-)
-def test_search_municipality_rejects_invalid_name(
-    fake_engine_class,
-    name,
-):
-    municipality = {
-        "code": "4300034",
-        "name": name,
-        "state": "RS",
-    }
-
-    engine = fake_engine_class()
-    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
-
-    with pytest.raises(ValueError):
-        coordinator.search_municipality(municipality)
-
-    assert engine.calls == []
-
-
-@pytest.mark.parametrize(
-    "state",
-    [
-        "",
-        "R",
-        "RSR",
-        "12",
-        None,
-        123,
-    ],
-)
-def test_search_municipality_rejects_invalid_state(
-    fake_engine_class,
-    state,
-):
-    municipality = {
-        "code": "4300034",
-        "name": "Aceguá",
-        "state": state,
-    }
-
-    engine = fake_engine_class()
-    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
-
-    with pytest.raises(ValueError):
-        coordinator.search_municipality(municipality)
-
-    assert engine.calls == []
-
-
-def test_search_municipality_validates_limit(
-    fake_engine_class,
-):
-    municipality = {
-        "code": "4300034",
-        "name": "Aceguá",
-        "state": "RS",
-    }
-
-    engine = fake_engine_class()
-    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
-
-    with pytest.raises(ValueError):
-        coordinator.search_municipality(
-            municipality,
-            limit_per_query=0,
-        )
-
-    with pytest.raises(ValueError):
-        coordinator.search_municipality(
-            municipality,
-            limit_per_query=51,
-        )
-
-    assert engine.calls == []
-
-
-def test_search_municipality_preserves_origins_and_deduplicates(
-    fake_engine_class,
-):
-    municipality = {
-        "code": "4300034",
-        "name": "Aceguá",
-        "state": "RS",
-    }
-
-    query = (
-        "vagas de emprego empresas contratando agências de emprego "
-        "SINE Aceguá RS"
-    )
-
-    first_result = make_result(
-        "https://empresa.example/vagas?utm_source=google"
-    )
-    second_result = make_result(
-        "https://empresa.example/vagas"
-    )
-
-    engine = fake_engine_class({
-        query: [first_result, second_result],
-    })
-
-    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
-
-    report = coordinator.search_municipality(municipality)
-
-    assert len(report.results) == 1
-    assert report.results[0] == first_result
-
-    assert len(report.matches) == 2
-
-    assert (
-        report.matches[0].normalized_url
-        == report.matches[1].normalized_url
-    )
-
-    assert all(
-        match.municipality == "Aceguá"
-        and match.state == "RS"
-        for match in report.matches
-    )
-    
-
-
-# ============================================================
-# Cobertura nacional explícita: regiões e unidades federativas
-# ============================================================
-
-
-def test_geographic_catalog_covers_all_27_federative_units():
-    expected = {
-        "AC", "AL", "AP", "AM", "BA", "CE", "DF", "ES", "GO",
-        "MA", "MT", "MS", "MG", "PA", "PB", "PR", "PE", "PI",
-        "RJ", "RN", "RS", "RO", "RR", "SC", "SP", "SE", "TO",
-    }
-
-    actual = {
-        category.removeprefix("state:")
-        for category in national_discovery.STATE_SEARCHES
-    }
-
-    assert actual == expected
-    assert national_discovery.BRAZILIAN_STATE_CODES == expected
-
-
-def test_geographic_catalog_covers_all_five_regions_without_gaps_or_overlap():
-    expected_regions = {
-        "region:norte",
-        "region:nordeste",
-        "region:centro-oeste",
-        "region:sudeste",
-        "region:sul",
-    }
-
-    assert set(national_discovery.REGIONAL_SEARCHES) == expected_regions
-    assert set(national_discovery.REGION_STATES) == expected_regions
-
-    all_states = []
-    for states in national_discovery.REGION_STATES.values():
-        all_states.extend(states)
-
-    assert len(all_states) == 27
-    assert len(set(all_states)) == 27
-    assert set(all_states) == national_discovery.BRAZILIAN_STATE_CODES
-
-
-def test_geographic_queries_stay_within_national_query_limit():
-    queries = national_discovery.NationalDiscoveryCoordinator.build_national_queries(
-        include_geography=True,
-    )
-
-    assert len(queries) <= national_discovery.MAX_NATIONAL_QUERIES
-    assert len(queries) == len(set(queries))
-
-
-def test_ibge_catalog_rejects_unknown_state_code(monkeypatch):
-    national_discovery.load_brazilian_municipalities.cache_clear()
-    monkeypatch.setattr(
-        national_discovery.httpx,
-        "get",
-        lambda *args, **kwargs: SimpleNamespace(
-            raise_for_status=lambda: None,
-            json=lambda: [make_ibge_municipality(9999999, "Cidade Teste", "XX")],
-        ),
-    )
-
-    with pytest.raises(
-        national_discovery.MunicipalityCatalogError,
-        match="dados municipais incompletos",
-    ):
-        national_discovery.load_brazilian_municipalities()
-
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
-
-def test_ibge_catalog_rejects_non_seven_digit_code(monkeypatch):
-    national_discovery.load_brazilian_municipalities.cache_clear()
-    monkeypatch.setattr(
-        national_discovery.httpx,
-        "get",
-        lambda *args, **kwargs: SimpleNamespace(
-            raise_for_status=lambda: None,
-            json=lambda: [make_ibge_municipality(123, "Cidade Teste", "RS")],
-        ),
-    )
-
-    with pytest.raises(
-        national_discovery.MunicipalityCatalogError,
-        match="dados municipais incompletos",
-    ):
-        national_discovery.load_brazilian_municipalities()
-
-    national_discovery.load_brazilian_municipalities.cache_clear()
-
-
-def test_national_geographic_queries_include_every_state_name():
-    query_items = national_discovery.NationalDiscoveryCoordinator._build_query_items(
-        include_geography=True,
-    )
-
-    state_items = {
-        category: query
-        for category, query in query_items
-        if category.startswith("state:")
-    }
-
-    assert set(state_items) == set(national_discovery.STATE_SEARCHES)
-
-    for category, state_name in national_discovery.STATE_SEARCHES.items():
-        assert state_name in state_items[category]
-
-
-def test_national_geographic_queries_include_each_region():
-    query_items = national_discovery.NationalDiscoveryCoordinator._build_query_items(
-        include_geography=True,
-    )
-
-    region_categories = {
-        category
-        for category, _ in query_items
-        if category.startswith("region:")
-    }
-
-    assert region_categories == set(national_discovery.REGIONAL_SEARCHES)
+    catalog_path.write_text(
+        json.dumps(invalid_payload, 
