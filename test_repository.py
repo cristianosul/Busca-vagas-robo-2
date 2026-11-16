@@ -620,4 +620,396 @@ def test_init_db_reports_invalid_legacy_url_and_preserves_candidate(
 
     assert total == 1
     assert row == (77, "endereco-invalido")
-    
+
+
+# ============================================================
+# Testes adicionais: SQL, PostgreSQL e transações SQLite
+# ============================================================
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        (
+            "SELECT ?",
+            "SELECT %s",
+        ),
+        (
+            "SELECT ?, ?",
+            "SELECT %s, %s",
+        ),
+        (
+            "SELECT '?' AS literal, ? AS value",
+            "SELECT '?' AS literal, %s AS value",
+        ),
+        (
+            "SELECT 'it''s ?' AS literal, ? AS value",
+            "SELECT 'it''s ?' AS literal, %s AS value",
+        ),
+        (
+            'SELECT "?" AS identifier, ? AS value',
+            'SELECT "?" AS identifier, %s AS value',
+        ),
+        (
+            'SELECT "a""?b", ?',
+            'SELECT "a""?b", %s',
+        ),
+        (
+            "SELECT ? -- comentário com ?\n, ?",
+            "SELECT %s -- comentário com ?\n, %s",
+        ),
+        (
+            "SELECT ? /* comentário com ? */, ?",
+            "SELECT %s /* comentário com ? */, %s",
+        ),
+        (
+            "SELECT ? /* externo /* interno ? */ final ? */, ?",
+            "SELECT %s /* externo /* interno ? */ final ? */, %s",
+        ),
+        (
+            "SELECT $$ conteúdo ? $$, ?",
+            "SELECT $$ conteúdo ? $$, %s",
+        ),
+        (
+            "SELECT $tag$ conteúdo ? $tag$, ?",
+            "SELECT $tag$ conteúdo ? $tag$, %s",
+        ),
+        (
+            "SELECT $body$ texto $other$ ? $body$, ?",
+            "SELECT $body$ texto $other$ ? $body$, %s",
+        ),
+        (
+            "SELECT '?' AS literal, ? -- final ?",
+            "SELECT '?' AS literal, %s -- final ?",
+        ),
+    ],
+)
+def test_convert_sql_placeholders_preserves_sql_literals(
+    sql,
+    expected,
+):
+    result = repository._convert_sql_placeholders(sql)
+
+    assert result == expected
+
+
+def test_convert_sql_placeholders_preserves_sql_without_placeholders():
+    sql = """
+        SELECT id, title
+        FROM candidates
+        WHERE status = 'review'
+    """
+
+    assert repository._convert_sql_placeholders(sql) == sql
+
+
+def test_convert_sql_placeholders_handles_empty_sql():
+    assert repository._convert_sql_placeholders("") == ""
+
+
+def test_convert_sql_placeholders_does_not_modify_question_marks_in_comments():
+    sql = """
+        SELECT ?
+        -- comentário ?
+        /* outro comentário ? */
+    """
+
+    expected = """
+        SELECT %s
+        -- comentário ?
+        /* outro comentário ? */
+    """
+
+    assert repository._convert_sql_placeholders(sql) == expected
+
+
+def test_convert_sql_placeholders_handles_multiple_dollar_quoted_blocks():
+    sql = (
+        "SELECT $$ primeiro ? $$, "
+        "$body$ segundo ? $body$, ?"
+    )
+
+    expected = (
+        "SELECT $$ primeiro ? $$, "
+        "$body$ segundo ? $body$, %s"
+    )
+
+    assert repository._convert_sql_placeholders(sql) == expected
+
+
+def test_execute_converts_placeholders_for_postgresql(monkeypatch):
+    class FakeConnection:
+        def __init__(self):
+            self.sql = None
+            self.params = None
+            self.result = object()
+
+        def execute(self, sql, params=()):
+            self.sql = sql
+            self.params = params
+            return self.result
+
+    connection = FakeConnection()
+
+    monkeypatch.setattr(
+        repository,
+        "DATABASE_URL",
+        "postgresql://user:password@example.com/database",
+    )
+
+    result = repository.execute(
+        connection,
+        "SELECT '?' AS literal, ? AS value",
+        ("teste",),
+    )
+
+    assert result is connection.result
+    assert connection.sql == (
+        "SELECT '?' AS literal, %s AS value"
+    )
+    assert connection.params == ("teste",)
+
+
+def test_execute_preserves_parameters_for_postgresql(monkeypatch):
+    class FakeConnection:
+        def __init__(self):
+            self.sql = None
+            self.params = None
+
+        def execute(self, sql, params=()):
+            self.sql = sql
+            self.params = params
+            return "resultado"
+
+    connection = FakeConnection()
+
+    monkeypatch.setattr(
+        repository,
+        "DATABASE_URL",
+        "postgresql://user:password@example.com/database",
+    )
+
+    params = ("Empresa", 123, None)
+
+    repository.execute(
+        connection,
+        "SELECT * FROM candidates WHERE company = ? AND id = ? AND location = ?",
+        params,
+    )
+
+    assert connection.sql == (
+        "SELECT * FROM candidates WHERE company = %s AND id = %s AND location = %s"
+    )
+    assert connection.params == params
+
+
+# ============================================================
+# Testes adicionais: transações SQLite
+# ============================================================
+
+
+def test_db_session_immediate_starts_write_transaction(isolated_db):
+    with repository.db_session(immediate=True) as conn:
+        assert conn.in_transaction is True
+
+
+def test_db_session_immediate_commits_successful_transaction(
+    isolated_db,
+):
+    with repository.db_session() as conn:
+        repository.execute(
+            conn,
+            """
+            CREATE TABLE transaction_probe (
+                value TEXT NOT NULL
+            )
+            """,
+        )
+
+    with repository.db_session(immediate=True) as conn:
+        repository.execute(
+            conn,
+            "INSERT INTO transaction_probe (value) VALUES (?)",
+            ("confirmado",),
+        )
+
+        assert conn.in_transaction is True
+
+    with repository.connect() as conn:
+        row = repository.execute(
+            conn,
+            "SELECT value FROM transaction_probe",
+        ).fetchone()
+
+    assert row["value"] == "confirmado"
+
+
+def test_db_session_immediate_rolls_back_failed_transaction(
+    isolated_db,
+):
+    with repository.db_session() as conn:
+        repository.execute(
+            conn,
+            """
+            CREATE TABLE transaction_probe (
+                value TEXT NOT NULL
+            )
+            """,
+        )
+
+    with pytest.raises(RuntimeError, match="falha simulada"):
+        with repository.db_session(immediate=True) as conn:
+            repository.execute(
+                conn,
+                "INSERT INTO transaction_probe (value) VALUES (?)",
+                ("não confirmado",),
+            )
+
+            raise RuntimeError("falha simulada")
+
+    with repository.connect() as conn:
+        row = repository.execute(
+            conn,
+            "SELECT COUNT(*) AS total FROM transaction_probe",
+        ).fetchone()
+
+    assert row["total"] == 0
+
+
+def test_db_session_immediate_keeps_operations_in_same_transaction(
+    isolated_db,
+):
+    with repository.db_session() as conn:
+        repository.execute(
+            conn,
+            """
+            CREATE TABLE transaction_probe (
+                value TEXT NOT NULL
+            )
+            """,
+        )
+
+    with repository.db_session(immediate=True) as conn:
+        repository.execute(
+            conn,
+            "INSERT INTO transaction_probe (value) VALUES (?)",
+            ("primeiro",),
+        )
+
+        repository.execute(
+            conn,
+            "INSERT INTO transaction_probe (value) VALUES (?)",
+            ("segundo",),
+        )
+
+        assert conn.in_transaction is True
+
+    with repository.connect() as conn:
+        rows = repository.execute(
+            conn,
+            "SELECT value FROM transaction_probe ORDER BY value",
+        ).fetchall()
+
+    assert [row["value"] for row in rows] == [
+        "primeiro",
+        "segundo",
+    ]
+
+
+# ============================================================
+# Testes adicionais: inicialização e migrações
+# ============================================================
+
+
+def test_init_db_can_run_multiple_times(isolated_db):
+    repository.save_candidate(make_candidate())
+    repository.save_source(make_source())
+
+    repository.init_db()
+    repository.init_db()
+
+    candidates = repository.list_candidates()
+    sources = repository.list_sources()
+
+    assert len(candidates) == 1
+    assert len(sources) == 1
+
+
+def test_init_db_preserves_existing_candidate_after_reinitialization(
+    isolated_db,
+):
+    original = repository.save_candidate(make_candidate())
+
+    repository.init_db()
+
+    results = repository.list_candidates()
+
+    assert len(results) == 1
+    assert results[0]["id"] == original["id"]
+    assert results[0]["title"] == "Auxiliar administrativo"
+
+
+def test_init_db_preserves_existing_source_after_reinitialization(
+    isolated_db,
+):
+    repository.save_source(make_source())
+
+    repository.init_db()
+
+    result = repository.get_source_record("empresa-teste")
+
+    assert result is not None
+    assert result["name"] == "Empresa de Teste"
+    assert result["enabled"] is False
+
+
+# ============================================================
+# Testes adicionais: normalização de URLs
+# ============================================================
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        (
+            "https://EXAMPLE.COM/jobs/123",
+            "https://example.com/jobs/123",
+        ),
+        (
+            "https://example.com/jobs/123?utm_campaign=teste&id=10",
+            "https://example.com/jobs/123?id=10",
+        ),
+        (
+            "https://example.com/jobs/123?gclid=abc&ref=portal",
+            "https://example.com/jobs/123?ref=portal",
+        ),
+        (
+            "https://example.com/jobs/123#candidatura",
+            "https://example.com/jobs/123",
+        ),
+        (
+            "https://example.com:443/jobs/123",
+            "https://example.com/jobs/123",
+        ),
+    ],
+)
+def test_normalize_job_url_additional_valid_cases(url, expected):
+    assert repository.normalize_job_url(url) == expected
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "",
+        "   ",
+        "example.com/jobs/123",
+        "http:///jobs/123",
+        "https://",
+        "https://example.com:abc/jobs/123",
+        "https://example.com/jobs/123\n?x=1",
+    ],
+)
+def test_normalize_job_url_rejects_additional_invalid_cases(url):
+    with pytest.raises(ValueError):
+        repository.normalize_job_url(url)
+        
