@@ -981,7 +981,7 @@ def test_init_db_preserves_existing_source_after_reinitialization(
         ),
         (
             "https://example.com/jobs/123?gclid=abc&ref=portal",
-            "https://example.com/jobs/123?ref=portal",
+            "https://example.com/jobs/123",
         ),
         (
             "https://example.com/jobs/123#candidatura",
