@@ -624,7 +624,8 @@ class NationalDiscoveryCoordinator:
             limit_per_query,
         )
         
-     def search_company(
+        
+    def search_company(
         self,
         company_name: str,
         limit_per_query: int = 10,
