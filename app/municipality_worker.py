@@ -80,10 +80,10 @@ def _heartbeat_loop(
     interval: int,
 ):
     """
-    Renova a reserva periodicamente em uma conexão independente.
+    Renova a reserva periodicamente.
 
-    Se a reserva deixar de pertencer a este worker, interrompe
-    os heartbeats e registra a falha de propriedade.
+    Se perder a propriedade da reserva, registra o erro
+    e encerra o heartbeat.
     """
 
     while not stop_event.wait(interval):
@@ -133,10 +133,10 @@ def _stop_heartbeat(
     thread: threading.Thread | None,
 ):
     """
-    Solicita a parada e aguarda o encerramento completo da thread.
+    Para o heartbeat e aguarda o encerramento completo da thread.
 
-    Não permite que um heartbeat continue executando depois
-    da conclusão ou da falha do município.
+    Não deixa uma renovação de reserva continuar depois
+    da conclusão ou falha do município.
     """
 
     if stop_event is None or thread is None:
@@ -148,7 +148,7 @@ def _stop_heartbeat(
 
 def _municipality_payload(claimed: dict) -> dict:
     """
-    Adapta os nomes retornados pelo scheduler ao contrato
+    Adapta os campos do scheduler ao contrato
     de search_municipality().
     """
 
@@ -197,10 +197,10 @@ def _save_report(
     report: Any,
 ) -> int:
     """
-    Salva os resultados brutos encontrados.
+    Persiste os resultados brutos encontrados.
 
-    Usa matches para preservar a categoria e a consulta
-    que originaram cada resultado.
+    Preserva a categoria e a consulta que originaram
+    cada resultado.
     """
 
     matches = getattr(report, "matches", None)
@@ -274,13 +274,10 @@ def _report_errors(report: Any) -> list[str]:
     if not errors:
         return []
 
-    messages = []
-
-    for error in errors:
-        message = getattr(error, "message", error)
-        messages.append(str(message))
-
-    return messages
+    return [
+        str(getattr(error, "message", error))
+        for error in errors
+    ]
 
 
 def _record_failure(
@@ -289,9 +286,9 @@ def _record_failure(
     lease_token: str,
 ) -> bool:
     """
-    Registra a falha e agenda nova tentativa quando permitido.
+    Registra a falha e solicita nova tentativa quando permitida.
 
-    Retorna True quando o município foi devolvido para pending.
+    Retorna True quando o município volta para pending.
     """
 
     mark_municipality_failed(
@@ -336,10 +333,10 @@ def run_worker(
     """
     Executa uma quantidade limitada de tentativas de pesquisa.
 
-    O coordenador é recebido por parâmetro para permitir testes
-    isolados sem chamadas reais aos provedores de pesquisa.
+    Aceita coordenadores compatíveis por comportamento,
+    permitindo testes isolados com implementações simuladas.
 
-    max_municipalities limita o número de tentativas nesta execução,
+    max_municipalities limita o número de tentativas,
     não o número de municípios únicos.
     """
 
@@ -437,7 +434,7 @@ def run_worker(
 
             lease_token = lease_token.strip()
 
-            # Confirma a propriedade da reserva antes da pesquisa.
+            # Confirma a reserva antes de iniciar a pesquisa.
             heartbeat_municipality(
                 municipality_code,
                 lease_token,
@@ -471,8 +468,8 @@ def run_worker(
                     + heartbeat_errors[-1]
                 )
 
-            # Salva resultados parciais mesmo quando alguma
-            # consulta do relatório tiver falhado.
+            # Persiste resultados parciais antes de avaliar erros
+            # das consultas individuais.
             saved = _save_report(
                 municipality,
                 report,
@@ -488,7 +485,7 @@ def run_worker(
                     + "; ".join(report_errors)
                 )
 
-            # Para e aguarda a thread antes da confirmação final.
+            # Para e aguarda o encerramento completo da thread.
             _stop_heartbeat(
                 stop_event,
                 heartbeat_thread,
@@ -543,8 +540,7 @@ def run_worker(
                 "error": message,
             })
 
-            # Interrompe o heartbeat antes de alterar o estado
-            # da reserva no scheduler.
+            # Interrompe o heartbeat antes de alterar a reserva.
             _stop_heartbeat(
                 stop_event,
                 heartbeat_thread,
@@ -553,7 +549,9 @@ def run_worker(
             stop_event = None
             heartbeat_thread = None
 
-            # Só é possível registrar falha com uma reserva válida.
+            # Uma reserva malformada não pode ser alterada com
+            # segurança. A recuperação de reservas stale poderá
+            # tratar esse caso posteriormente.
             if (
                 municipality_code is not None
                 and isinstance(lease_token, str)
@@ -579,7 +577,6 @@ def run_worker(
                     )
 
         finally:
-            # Proteção adicional para qualquer saída inesperada.
             _stop_heartbeat(
                 stop_event,
                 heartbeat_thread,
@@ -603,8 +600,6 @@ def run_worker(
 def build_default_coordinator() -> NationalDiscoveryCoordinator:
     """
     Constrói o mecanismo de pesquisa usando o provedor Tavily.
-
-    A chave TAVILY_API_KEY deve estar configurada no ambiente.
     """
 
     search_engine = SearchEngine([
