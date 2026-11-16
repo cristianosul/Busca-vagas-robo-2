@@ -901,3 +901,254 @@ def test_ibge_connection_failure_raises_catalog_error(monkeypatch):
     national_discovery.load_brazilian_municipalities.cache_clear()
     
     
+def test_search_municipality_accepts_municipality_object(
+    fake_engine_class,
+):
+    municipality = national_discovery.Municipality(
+        code="4300034",
+        name="Aceguá",
+        state="RS",
+    )
+
+    result = make_result("https://empresa.example/vagas")
+    engine = fake_engine_class({
+        "vagas de emprego empresas contratando agências de emprego "
+        "SINE Aceguá RS": [result],
+    })
+
+    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
+
+    report = coordinator.search_municipality(municipality)
+
+    assert report.results == (result,)
+    assert len(engine.calls) == 1
+
+
+def test_search_municipality_accepts_dictionary(
+    fake_engine_class,
+):
+    municipality = {
+        "code": "4300034",
+        "name": "Aceguá",
+        "state": "RS",
+    }
+
+    result = make_result("https://empresa.example/vagas")
+    engine = fake_engine_class({
+        "vagas de emprego empresas contratando agências de emprego "
+        "SINE Aceguá RS": [result],
+    })
+
+    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
+
+    report = coordinator.search_municipality(municipality)
+
+    assert report.results == (result,)
+
+
+def test_search_municipality_executes_only_one_query(
+    fake_engine_class,
+):
+    municipality = {
+        "code": "4300034",
+        "name": "Aceguá",
+        "state": "RS",
+    }
+
+    engine = fake_engine_class()
+    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
+
+    report = coordinator.search_municipality(municipality)
+
+    assert len(engine.calls) == 1
+    assert len(report.queries) == 1
+    assert engine.calls[0][1] == 10
+
+
+def test_search_municipality_records_city_and_state(
+    fake_engine_class,
+):
+    municipality = {
+        "code": "4300034",
+        "name": "Aceguá",
+        "state": "rs",
+    }
+
+    result = make_result("https://empresa.example/vagas")
+    engine = fake_engine_class({
+        "vagas de emprego empresas contratando agências de emprego "
+        "SINE Aceguá RS": [result],
+    })
+
+    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
+
+    report = coordinator.search_municipality(municipality)
+
+    assert len(report.matches) == 1
+
+    match = report.matches[0]
+
+    assert match.category == "municipality:RS"
+    assert match.municipality == "Aceguá"
+    assert match.state == "RS"
+    assert match.result == result
+
+
+@pytest.mark.parametrize(
+    "code",
+    [
+        "123",
+        "abcdefg",
+        4300034,
+        "",
+    ],
+)
+def test_search_municipality_rejects_invalid_code(
+    fake_engine_class,
+    code,
+):
+    municipality = {
+        "code": code,
+        "name": "Aceguá",
+        "state": "RS",
+    }
+
+    engine = fake_engine_class()
+    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
+
+    with pytest.raises(ValueError):
+        coordinator.search_municipality(municipality)
+
+    assert engine.calls == []
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "",
+        "   ",
+        None,
+        123,
+    ],
+)
+def test_search_municipality_rejects_invalid_name(
+    fake_engine_class,
+    name,
+):
+    municipality = {
+        "code": "4300034",
+        "name": name,
+        "state": "RS",
+    }
+
+    engine = fake_engine_class()
+    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
+
+    with pytest.raises(ValueError):
+        coordinator.search_municipality(municipality)
+
+    assert engine.calls == []
+
+
+@pytest.mark.parametrize(
+    "state",
+    [
+        "",
+        "R",
+        "RSR",
+        "12",
+        None,
+        123,
+    ],
+)
+def test_search_municipality_rejects_invalid_state(
+    fake_engine_class,
+    state,
+):
+    municipality = {
+        "code": "4300034",
+        "name": "Aceguá",
+        "state": state,
+    }
+
+    engine = fake_engine_class()
+    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
+
+    with pytest.raises(ValueError):
+        coordinator.search_municipality(municipality)
+
+    assert engine.calls == []
+
+
+def test_search_municipality_validates_limit(
+    fake_engine_class,
+):
+    municipality = {
+        "code": "4300034",
+        "name": "Aceguá",
+        "state": "RS",
+    }
+
+    engine = fake_engine_class()
+    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
+
+    with pytest.raises(ValueError):
+        coordinator.search_municipality(
+            municipality,
+            limit_per_query=0,
+        )
+
+    with pytest.raises(ValueError):
+        coordinator.search_municipality(
+            municipality,
+            limit_per_query=51,
+        )
+
+    assert engine.calls == []
+
+
+def test_search_municipality_preserves_origins_and_deduplicates(
+    fake_engine_class,
+):
+    municipality = {
+        "code": "4300034",
+        "name": "Aceguá",
+        "state": "RS",
+    }
+
+    query = (
+        "vagas de emprego empresas contratando agências de emprego "
+        "SINE Aceguá RS"
+    )
+
+    first_result = make_result(
+        "https://empresa.example/vagas?utm_source=google"
+    )
+    second_result = make_result(
+        "https://empresa.example/vagas"
+    )
+
+    engine = fake_engine_class({
+        query: [first_result, second_result],
+    })
+
+    coordinator = national_discovery.NationalDiscoveryCoordinator(engine)
+
+    report = coordinator.search_municipality(municipality)
+
+    assert len(report.results) == 1
+    assert report.results[0] == first_result
+
+    assert len(report.matches) == 2
+
+    assert (
+        report.matches[0].normalized_url
+        == report.matches[1].normalized_url
+    )
+
+    assert all(
+        match.municipality == "Aceguá"
+        and match.state == "RS"
+        for match in report.matches
+    )
+    
