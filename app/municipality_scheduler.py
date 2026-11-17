@@ -2,14 +2,36 @@
 import secrets
 from datetime import datetime, timedelta, timezone
 
+from app.national_discovery import UF_IBGE_CODES
 from app.repository import DATABASE_URL, db_session, execute
 
 
 MAX_MUNICIPALITY_ATTEMPTS = 3
+SCHEDULER_STATEMENT_TIMEOUT_MS = 10_000
+SCHEDULER_LOCK_TIMEOUT_MS = 3_000
 
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _scheduler_db_session(immediate: bool = False):
+    """
+    Abre uma sessão do banco com limites específicos do scheduler.
+
+    PostgreSQL:
+    - Até 10 segundos para cada comando SQL.
+    - Até 3 segundos de espera por bloqueios.
+
+    SQLite:
+    - Preserva o comportamento de db_session.
+    - Mantém BEGIN IMMEDIATE quando solicitado.
+    """
+    return db_session(
+        immediate=immediate,
+        statement_timeout_ms=SCHEDULER_STATEMENT_TIMEOUT_MS,
+        lock_timeout_ms=SCHEDULER_LOCK_TIMEOUT_MS,
+    )
 
 
 def _validate_batch_index(batch_index: int) -> int:
@@ -19,12 +41,14 @@ def _validate_batch_index(batch_index: int) -> int:
         or batch_index < 0
     ):
         raise ValueError("O índice do lote deve ser um inteiro não negativo.")
-
     return batch_index
 
 
 def _validate_municipality_code(municipality_code: str) -> str:
-    code = str(municipality_code).strip()
+    if not isinstance(municipality_code, str):
+        raise ValueError("Código IBGE inválido.")
+
+    code = municipality_code.strip()
 
     if len(code) != 7 or not code.isdigit():
         raise ValueError("Código IBGE inválido.")
@@ -68,6 +92,16 @@ def _municipality_data(municipality):
             "O código IBGE deve conter exatamente sete dígitos."
         )
 
+    expected_uf_code = UF_IBGE_CODES.get(state)
+
+    if expected_uf_code is None:
+        raise ValueError("A UF informada não é uma unidade federativa brasileira.")
+
+    if code[:2] != expected_uf_code:
+        raise ValueError(
+            "O código IBGE do município não corresponde à UF informada."
+        )
+
     return code, name, state
 
 
@@ -103,7 +137,7 @@ def _ensure_lease_token_column(conn):
 
 def init_municipality_scheduler():
     """Cria as tabelas próprias do controle de lotes municipais."""
-    with db_session() as conn:
+    with _scheduler_db_session() as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS municipality_discovery (
                 municipality_code TEXT PRIMARY KEY,
@@ -123,7 +157,6 @@ def init_municipality_scheduler():
                 lease_token TEXT
             )
         """)
-
         _ensure_lease_token_column(conn)
 
         conn.execute("""
@@ -131,7 +164,6 @@ def init_municipality_scheduler():
             ix_municipality_discovery_batch_status
             ON municipality_discovery(batch_index, status)
         """)
-
         conn.execute("""
             CREATE TABLE IF NOT EXISTS municipality_scheduler_state (
                 state_id INTEGER PRIMARY KEY CHECK(state_id = 1),
@@ -145,7 +177,6 @@ def init_municipality_scheduler():
 def register_municipality_batch(batch_index: int, municipalities):
     """
     Registra os municípios de um lote sem duplicar códigos IBGE.
-
     Municípios já cadastrados não têm seu estado ou lote sobrescritos.
     O lote atual só avança quando novos municípios são registrados.
     """
@@ -159,14 +190,13 @@ def register_municipality_batch(batch_index: int, municipalities):
         raise ValueError("Um lote não pode conter mais de 60 municípios.")
 
     codes = [record[0] for record in records]
-
     if len(codes) != len(set(codes)):
         raise ValueError("O lote contém códigos IBGE duplicados.")
 
     now = utc_now()
     inserted_count = 0
 
-    with db_session(immediate=True) as conn:
+    with _scheduler_db_session(immediate=True) as conn:
         for code, name, state in records:
             cur = execute(
                 conn,
@@ -186,7 +216,6 @@ def register_municipality_batch(batch_index: int, municipalities):
                 """,
                 (code, name, state, batch_index, now, now),
             )
-
             if cur.rowcount > 0:
                 inserted_count += 1
 
@@ -215,7 +244,7 @@ def register_municipality_batch(batch_index: int, municipalities):
 
 def get_current_batch():
     """Retorna o lote atual ou None se ainda não houver estado salvo."""
-    with db_session() as conn:
+    with _scheduler_db_session() as conn:
         row = execute(
             conn,
             """
@@ -232,7 +261,7 @@ def get_batch_progress(batch_index: int):
     """Retorna o resumo de andamento de um lote."""
     batch_index = _validate_batch_index(batch_index)
 
-    with db_session() as conn:
+    with _scheduler_db_session() as conn:
         row = execute(
             conn,
             """
@@ -268,13 +297,12 @@ def list_batch_municipalities(
 ):
     """Lista municípios de um lote, opcionalmente filtrados por estado."""
     batch_index = _validate_batch_index(batch_index)
-
     allowed_statuses = {"pending", "running", "completed", "failed"}
 
     if status is not None and status not in allowed_statuses:
         raise ValueError("Estado de município inválido.")
 
-    with db_session() as conn:
+    with _scheduler_db_session() as conn:
         if status:
             rows = execute(
                 conn,
@@ -313,7 +341,7 @@ def claim_next_municipality(batch_index: int):
     batch_index = _validate_batch_index(batch_index)
     is_postgres = bool(DATABASE_URL)
 
-    with db_session(immediate=True) as conn:
+    with _scheduler_db_session(immediate=True) as conn:
         if is_postgres:
             row = execute(
                 conn,
@@ -390,7 +418,7 @@ def heartbeat_municipality(
     token = _validate_lease_token(lease_token)
     now = utc_now()
 
-    with db_session(immediate=True) as conn:
+    with _scheduler_db_session(immediate=True) as conn:
         row = execute(
             conn,
             """
@@ -423,7 +451,7 @@ def mark_municipality_completed(
     token = _validate_lease_token(lease_token)
     now = utc_now()
 
-    with db_session(immediate=True) as conn:
+    with _scheduler_db_session(immediate=True) as conn:
         row = execute(
             conn,
             """
@@ -466,7 +494,7 @@ def mark_municipality_failed(
 
     now = utc_now()
 
-    with db_session(immediate=True) as conn:
+    with _scheduler_db_session(immediate=True) as conn:
         row = execute(
             conn,
             """
@@ -515,7 +543,7 @@ def retry_failed_municipality(
 
     now = utc_now()
 
-    with db_session(immediate=True) as conn:
+    with _scheduler_db_session(immediate=True) as conn:
         row = execute(
             conn,
             """
@@ -552,7 +580,6 @@ def recover_interrupted_municipalities(
 
     Municípios que atingiram o limite de tentativas são marcados
     como failed. Os demais voltam para pending.
-
     O prazo considera updated_at, permitindo que o heartbeat
     renove a reserva. O token anterior é invalidado na recuperação.
     """
@@ -575,7 +602,7 @@ def recover_interrupted_municipalities(
 
     now = utc_now()
 
-    with db_session(immediate=True) as conn:
+    with _scheduler_db_session(immediate=True) as conn:
         if batch_index is None:
             cursor = execute(
                 conn,
