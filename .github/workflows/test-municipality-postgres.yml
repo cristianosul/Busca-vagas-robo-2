@@ -1,0 +1,69 @@
+
+name: Testes PostgreSQL do Scheduler Municipal
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/test-municipality-postgres.yml"
+      - "app/municipality_scheduler.py"
+      - "app/repository.py"
+      - "tests/test_municipality_scheduler_postgres.py"
+      - "requirements.txt"
+
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/test-municipality-postgres.yml"
+      - "app/municipality_scheduler.py"
+      - "app/repository.py"
+      - "tests/test_municipality_scheduler_postgres.py"
+      - "requirements.txt"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  postgres-integration:
+    name: Integração real com PostgreSQL temporário
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: busca_vagas_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d busca_vagas_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Baixar repositório
+        uses: actions/checkout@v7
+
+      - name: Configurar Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Instalar dependências
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pytest
+
+      - name: Executar testes de integração PostgreSQL
+        env:
+          DATABASE_URL: ""
+          TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/busca_vagas_test
+        run: |
+          python -m pytest -vv -ra tests/test_municipality_scheduler_postgres.py
