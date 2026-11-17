@@ -69,7 +69,7 @@ def make_match():
 
 
 def patch_worker_dependencies(monkeypatch, claims=None):
-    claims = list(claims or [MUNICIPALITY.copy()])
+    claims = list([MUNICIPALITY.copy()] if claims is None else claims)
 
     recovered = []
     monkeypatch.setattr(
