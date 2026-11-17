@@ -26,7 +26,10 @@ from app.municipality_scheduler import (
     recover_interrupted_municipalities,
     retry_failed_municipality,
 )
-from app.national_discovery import NationalDiscoveryCoordinator
+from app.national_discovery import (
+    UF_IBGE_CODES,
+    NationalDiscoveryCoordinator,
+)
 from app.repository import (
     init_db,
     save_discovery_result,
@@ -179,10 +182,23 @@ def _municipality_payload(claimed: dict) -> dict:
             "O scheduler retornou uma UF inválida."
         )
 
+    state = state.upper()
+    expected_uf_code = UF_IBGE_CODES.get(state)
+
+    if expected_uf_code is None:
+        raise ValueError(
+            "O scheduler retornou uma UF brasileira desconhecida."
+        )
+
+    if code[:2] != expected_uf_code:
+        raise ValueError(
+            "O código IBGE do município não corresponde à UF informada."
+        )
+
     return {
         "code": code,
         "name": name.strip(),
-        "state": state.upper(),
+        "state": state,
     }
 
 
