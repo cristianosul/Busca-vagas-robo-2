@@ -297,8 +297,34 @@ def connect():
 
 
 @contextmanager
-def db_session(immediate: bool = False):
-    """Garante transação e fechamento da conexão."""
+def db_session(
+    immediate: bool = False,
+    *,
+    statement_timeout_ms: int | None = None,
+    lock_timeout_ms: int | None = None,
+):
+    """
+    Garante transação e fechamento da conexão.
+
+    PostgreSQL:
+    - statement_timeout_ms limita a duração de cada comando SQL.
+    - lock_timeout_ms limita a espera por bloqueios.
+    - Os limites são locais à transação.
+
+    SQLite:
+    - Preserva o timeout e busy_timeout existentes.
+    - Mantém BEGIN IMMEDIATE quando solicitado.
+    """
+    statement_timeout_ms = _validate_timeout_ms(
+        statement_timeout_ms,
+        "statement_timeout_ms",
+    )
+
+    lock_timeout_ms = _validate_timeout_ms(
+        lock_timeout_ms,
+        "lock_timeout_ms",
+    )
+
     conn = connect()
 
     try:
@@ -306,7 +332,33 @@ def db_session(immediate: bool = False):
             conn.execute("BEGIN IMMEDIATE")
 
         with conn:
+            if DATABASE_URL:
+                if statement_timeout_ms is not None:
+                    conn.execute(
+                        """
+                        SELECT set_config(
+                            'statement_timeout',
+                            %s,
+                            true
+                        )
+                        """,
+                        (f"{statement_timeout_ms}ms",),
+                    )
+
+                if lock_timeout_ms is not None:
+                    conn.execute(
+                        """
+                        SELECT set_config(
+                            'lock_timeout',
+                            %s,
+                            true
+                        )
+                        """,
+                        (f"{lock_timeout_ms}ms",),
+                    )
+
             yield conn
+
     finally:
         conn.close()
 
