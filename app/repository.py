@@ -296,6 +296,23 @@ def connect():
     return conn
 
 
+def _validate_timeout_ms(value, name: str):
+    """Valida um limite de tempo em milissegundos."""
+    if value is None:
+        return None
+
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or value < 1
+    ):
+        raise ValueError(
+            f"{name} deve ser um inteiro positivo."
+        )
+
+    return value
+    
+
 @contextmanager
 def db_session(
     immediate: bool = False,
