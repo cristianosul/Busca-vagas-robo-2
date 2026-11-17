@@ -1,4 +1,3 @@
-
 """
 Worker independente de pesquisa municipal do Busca Vagas — Robô 2.
 
@@ -36,7 +35,6 @@ from app.search_engine import (
     SearchEngine,
     TavilySearchProvider,
 )
-
 
 logger = logging.getLogger("municipality_worker")
 
@@ -81,7 +79,6 @@ def _heartbeat_loop(
 ):
     """
     Renova a reserva periodicamente.
-
     Se perder a propriedade da reserva, registra o erro
     e encerra o heartbeat.
     """
@@ -124,7 +121,6 @@ def _start_heartbeat(
     )
 
     thread.start()
-
     return stop_event, thread, heartbeat_errors
 
 
@@ -160,7 +156,6 @@ def _municipality_payload(claimed: dict) -> dict:
     code = claimed.get("municipality_code")
     name = claimed.get("municipality_name")
     state = claimed.get("state")
-
     if (
         not isinstance(code, str)
         or len(code) != 7
@@ -174,7 +169,6 @@ def _municipality_payload(claimed: dict) -> dict:
         raise ValueError(
             "O scheduler retornou um nome municipal inválido."
         )
-
     if (
         not isinstance(state, str)
         or len(state) != 2
@@ -198,7 +192,6 @@ def _save_report(
 ) -> int:
     """
     Persiste os resultados brutos encontrados.
-
     Preserva a categoria e a consulta que originaram
     cada resultado.
     """
@@ -211,7 +204,6 @@ def _save_report(
         )
 
     saved = 0
-
     for match in matches:
         result = getattr(match, "result", None)
         category = getattr(match, "category", None)
@@ -226,7 +218,6 @@ def _save_report(
             raise ValueError(
                 "A pesquisa retornou um resultado sem conteúdo."
             )
-
         if (
             not isinstance(category, str)
             or not category.strip()
@@ -242,7 +233,6 @@ def _save_report(
             raise ValueError(
                 "Resultado sem consulta de origem."
             )
-
         if (
             not isinstance(normalized_url, str)
             or not normalized_url.strip()
@@ -250,7 +240,6 @@ def _save_report(
             raise ValueError(
                 "Resultado sem URL normalizada."
             )
-
         save_discovery_result(
             municipality_code=municipality["code"],
             municipality_name=municipality["name"],
@@ -270,7 +259,6 @@ def _report_errors(report: Any) -> list[str]:
     """Converte os erros do relatório em mensagens legíveis."""
 
     errors = getattr(report, "errors", ())
-
     if not errors:
         return []
 
@@ -296,7 +284,6 @@ def _record_failure(
         message,
         lease_token,
     )
-
     try:
         retry_failed_municipality(
             municipality_code,
@@ -309,7 +296,6 @@ def _record_failure(
         )
 
         return True
-
     except ValueError:
         logger.warning(
             "Município %s não será reenfileirado: "
@@ -332,7 +318,6 @@ def run_worker(
 ) -> dict:
     """
     Executa uma quantidade limitada de tentativas de pesquisa.
-
     Aceita coordenadores compatíveis por comportamento,
     permitindo testes isolados com implementações simuladas.
 
@@ -348,7 +333,6 @@ def run_worker(
         )
 
     batch_index = _validate_batch_index(batch_index)
-
     max_municipalities = _validate_positive_integer(
         max_municipalities,
         "max_municipalities",
@@ -368,14 +352,13 @@ def run_worker(
         raise ValueError(
             "limit_per_query não pode ultrapassar 20."
         )
-
     if (
         isinstance(stale_after_seconds, bool)
         or not isinstance(stale_after_seconds, int)
-        or stale_after_seconds < 0
+        or stale_after_seconds < 1
     ):
         raise ValueError(
-            "stale_after_seconds deve ser um inteiro não negativo."
+            "stale_after_seconds deve ser um inteiro positivo."
         )
 
     stats = {
@@ -388,7 +371,6 @@ def run_worker(
         "results_saved": 0,
         "errors": [],
     }
-
     logger.info(
         "Iniciando worker no lote %s; limite de tentativas: %s.",
         batch_index,
@@ -402,7 +384,6 @@ def run_worker(
 
     while stats["processed"] < max_municipalities:
         claimed = claim_next_municipality(batch_index)
-
         if claimed is None:
             logger.info(
                 "Não existem municípios pendentes no lote %s.",
@@ -421,7 +402,6 @@ def run_worker(
         try:
             municipality = _municipality_payload(claimed)
             municipality_code = municipality["code"]
-
             lease_token = claimed.get("lease_token")
 
             if (
@@ -433,7 +413,6 @@ def run_worker(
                 )
 
             lease_token = lease_token.strip()
-
             # Confirma a reserva antes de iniciar a pesquisa.
             heartbeat_municipality(
                 municipality_code,
@@ -449,7 +428,6 @@ def run_worker(
                 lease_token,
                 heartbeat_interval,
             )
-
             logger.info(
                 "Pesquisando %s/%s (%s).",
                 municipality["name"],
@@ -461,7 +439,6 @@ def run_worker(
                 municipality,
                 limit_per_query=limit_per_query,
             )
-
             if heartbeat_errors:
                 raise RuntimeError(
                     "A reserva do município foi perdida: "
@@ -478,7 +455,6 @@ def run_worker(
             stats["results_saved"] += saved
 
             report_errors = _report_errors(report)
-
             if report_errors:
                 raise RuntimeError(
                     "A pesquisa municipal apresentou falhas: "
@@ -493,7 +469,6 @@ def run_worker(
 
             stop_event = None
             heartbeat_thread = None
-
             if heartbeat_errors:
                 raise RuntimeError(
                     "A reserva do município foi perdida: "
@@ -510,7 +485,6 @@ def run_worker(
                 municipality_code,
                 lease_token,
             )
-
             stats["completed"] += 1
 
             logger.info(
@@ -529,7 +503,6 @@ def run_worker(
             )
 
             stats["failed"] += 1
-
             stats["errors"].append({
                 "municipality_code": municipality_code,
                 "municipality_name": (
@@ -545,10 +518,8 @@ def run_worker(
                 stop_event,
                 heartbeat_thread,
             )
-
             stop_event = None
             heartbeat_thread = None
-
             # Uma reserva malformada não pode ser alterada com
             # segurança. A recuperação de reservas stale poderá
             # tratar esse caso posteriormente.
@@ -563,7 +534,6 @@ def run_worker(
                         message,
                         lease_token,
                     )
-
                     if retried:
                         stats["retried"] += 1
 
@@ -575,7 +545,6 @@ def run_worker(
                         "poderá tratar o caso posteriormente.",
                         municipality_code,
                     )
-
         finally:
             _stop_heartbeat(
                 stop_event,
@@ -616,7 +585,6 @@ def main():
             "do Busca Vagas — Robô 2."
         )
     )
-
     parser.add_argument(
         "--batch-index",
         type=int,
@@ -630,7 +598,6 @@ def main():
         default=DEFAULT_MAX_MUNICIPALITIES,
         help="Máximo de tentativas nesta execução. Padrão: 1.",
     )
-
     parser.add_argument(
         "--limit-per-query",
         type=int,
@@ -649,7 +616,6 @@ def main():
         parser.error(
             "Configure TAVILY_API_KEY antes de iniciar o worker."
         )
-
     init_db()
     init_municipality_scheduler()
 
