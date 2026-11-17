@@ -31,10 +31,12 @@ class FakeCoordinator:
         self.calls = []
 
     def search_municipality(self, municipality, limit_per_query=10):
-        self.calls.append({
-            "municipality": municipality,
-            "limit_per_query": limit_per_query,
-        })
+        self.calls.append(
+            {
+                "municipality": municipality,
+                "limit_per_query": limit_per_query,
+            }
+        )
         if self.on_search is not None:
             self.on_search()
         if self.error is not None:
@@ -69,7 +71,8 @@ def make_match():
 
 
 def patch_worker_dependencies(monkeypatch, claims=None):
-    claims = list(claims or [MUNICIPALITY.copy()])
+    # None usa o município padrão; uma lista vazia deve continuar vazia.
+    claims = list([MUNICIPALITY.copy()] if claims is None else claims)
 
     recovered = []
     monkeypatch.setattr(
@@ -126,6 +129,29 @@ def patch_worker_dependencies(monkeypatch, claims=None):
     }
 
 
+@pytest.mark.parametrize(
+    ("claims", "expected_codes"),
+    [
+        (None, ["4305108"]),
+        ([], []),
+        ([{**MUNICIPALITY, "municipality_code": "4310000"}], ["4310000"]),
+    ],
+)
+def test_patch_worker_dependencies_preserves_claim_input(
+    monkeypatch, claims, expected_codes
+):
+    patch_worker_dependencies(monkeypatch, claims=claims)
+
+    received_codes = []
+    while True:
+        claimed = worker.claim_next_municipality(0)
+        if claimed is None:
+            break
+        received_codes.append(claimed["municipality_code"])
+
+    assert received_codes == expected_codes
+
+
 def test_worker_completes_municipality_successfully(monkeypatch):
     dependencies = patch_worker_dependencies(monkeypatch)
     coordinator = FakeCoordinator(report=make_report())
@@ -173,7 +199,9 @@ def test_worker_retries_failed_municipality(monkeypatch):
         claims.append(claim)
 
     dependencies = patch_worker_dependencies(monkeypatch, claims=claims)
-    coordinator = FakeCoordinator(error=RuntimeError("Falha simulada na pesquisa."))
+    coordinator = FakeCoordinator(
+        error=RuntimeError("Falha simulada na pesquisa.")
+    )
     stats = worker.run_worker(coordinator, batch_index=0, max_municipalities=3)
 
     assert stats["processed"] == 3
@@ -233,6 +261,7 @@ def test_worker_rejects_invalid_parameters(kwargs):
     coordinator = FakeCoordinator(report=make_report())
     parameters = {"batch_index": 0}
     parameters.update(kwargs)
+
     with pytest.raises(ValueError):
         worker.run_worker(coordinator, **parameters)
 
@@ -248,16 +277,17 @@ def test_worker_accepts_positive_stale_after_seconds(monkeypatch):
     )
 
     assert stats["processed"] == 0
-    assert dependencies["recovered"] == [{
-        "batch_index": 0,
-        "stale_after_seconds": 1,
-    }]
+    assert dependencies["recovered"] == [
+        {"batch_index": 0, "stale_after_seconds": 1}
+    ]
 
 
 def test_worker_rejects_invalid_claimed_municipality(monkeypatch):
     invalid_claim = MUNICIPALITY.copy()
     invalid_claim["municipality_code"] = "123"
-    dependencies = patch_worker_dependencies(monkeypatch, claims=[invalid_claim])
+    dependencies = patch_worker_dependencies(
+        monkeypatch, claims=[invalid_claim]
+    )
     coordinator = FakeCoordinator(report=make_report())
 
     stats = worker.run_worker(
@@ -280,7 +310,11 @@ def test_worker_stops_heartbeat_before_completion(monkeypatch):
     monkeypatch.setattr(
         worker,
         "_start_heartbeat",
-        lambda code, token, interval: (stop_event, fake_thread, heartbeat_errors),
+        lambda code, token, interval: (
+            stop_event,
+            fake_thread,
+            heartbeat_errors,
+        ),
     )
 
     stats = worker.run_worker(
@@ -303,7 +337,11 @@ def test_worker_marks_failure_when_heartbeat_was_lost_before_save(monkeypatch):
     monkeypatch.setattr(
         worker,
         "_start_heartbeat",
-        lambda code, token, interval: (stop_event, fake_thread, heartbeat_errors),
+        lambda code, token, interval: (
+            stop_event,
+            fake_thread,
+            heartbeat_errors,
+        ),
     )
 
     coordinator = FakeCoordinator(report=make_report(matches=[make_match()]))
@@ -325,7 +363,11 @@ def test_worker_detects_heartbeat_loss_during_search_before_saving(monkeypatch):
     monkeypatch.setattr(
         worker,
         "_start_heartbeat",
-        lambda code, token, interval: (stop_event, fake_thread, heartbeat_errors),
+        lambda code, token, interval: (
+            stop_event,
+            fake_thread,
+            heartbeat_errors,
+        ),
     )
 
     def lose_lease_during_search():
@@ -360,7 +402,13 @@ def test_heartbeat_loop_renews_until_stop_event_is_set(monkeypatch):
     heartbeat_errors = []
     thread = Thread(
         target=worker._heartbeat_loop,
-        args=("4305108", "lease-token-1", stop_event, heartbeat_errors, 0.01),
+        args=(
+            "4305108",
+            "lease-token-1",
+            stop_event,
+            heartbeat_errors,
+            0.01,
+        ),
     )
 
     thread.start()
@@ -386,7 +434,13 @@ def test_heartbeat_loop_records_error_and_stops_after_lease_loss(monkeypatch):
     heartbeat_errors = []
     thread = Thread(
         target=worker._heartbeat_loop,
-        args=("4305108", "lease-token-1", stop_event, heartbeat_errors, 0.01),
+        args=(
+            "4305108",
+            "lease-token-1",
+            stop_event,
+            heartbeat_errors,
+            0.01,
+        ),
     )
 
     thread.start()
@@ -449,3 +503,4 @@ def test_worker_does_not_start_when_stale_recovery_validation_fails(monkeypatch)
 
     assert dependencies["recovered"] == []
     assert coordinator.calls == []
+    
