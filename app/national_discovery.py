@@ -21,6 +21,8 @@ from app.search_engine import (
 
 MAX_NATIONAL_QUERIES = 60
 MAX_MUNICIPALITIES_PER_BATCH = 60
+EXPECTED_BRAZILIAN_MUNICIPALITIES = 5571
+EXPECTED_BRAZILIAN_STATES = 27
 
 # O catálogo é versionado junto com o projeto. A leitura local evita depender
 # da disponibilidade da API do IBGE durante os testes e a execução do worker.
@@ -350,10 +352,11 @@ def load_brazilian_municipalities() -> tuple[Municipality, ...]:
     if (
         isinstance(declared_total, bool)
         or not isinstance(declared_total, int)
+        or declared_total != EXPECTED_BRAZILIAN_MUNICIPALITIES
         or declared_total != len(records)
     ):
         raise MunicipalityCatalogError(
-            "O total declarado de municípios não corresponde aos registros do catálogo."
+            "O catálogo não contém os 5.571 municípios esperados para o DTB 2025."
         )
 
     municipalities = []
@@ -373,6 +376,15 @@ def load_brazilian_municipalities() -> tuple[Municipality, ...]:
     if not municipalities:
         raise MunicipalityCatalogError(
             "Nenhum município válido foi encontrado no catálogo local."
+        )
+
+    catalog_states = {municipality.state for municipality in municipalities}
+    if (
+        len(catalog_states) != EXPECTED_BRAZILIAN_STATES
+        or catalog_states != BRAZILIAN_STATE_CODES
+    ):
+        raise MunicipalityCatalogError(
+            "O catálogo não contém cobertura completa das 27 unidades federativas."
         )
 
     return tuple(
@@ -729,6 +741,12 @@ class NationalDiscoveryCoordinator:
 
         name = name.strip()
         state = state.upper()
+        expected_uf_code = UF_IBGE_CODES[state]
+
+        if code[:2] != expected_uf_code:
+            raise ValueError(
+                "O código IBGE do município não corresponde à UF informada."
+            )
 
         query = (
             "vagas de emprego empresas contratando agências de emprego "
