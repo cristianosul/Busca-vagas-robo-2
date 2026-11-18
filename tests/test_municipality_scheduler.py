@@ -1,4 +1,3 @@
-
 import sqlite3
 from contextlib import contextmanager
 
@@ -13,7 +12,12 @@ def scheduler_db(tmp_path, monkeypatch):
     database_path = tmp_path / "municipality_scheduler_test.db"
 
     @contextmanager
-    def isolated_db_session(immediate=False):
+    def isolated_db_session(
+        immediate=False,
+        *,
+        statement_timeout_ms=None,
+        lock_timeout_ms=None,
+    ):
         conn = sqlite3.connect(database_path, timeout=10)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
@@ -141,7 +145,12 @@ def test_init_adds_lease_token_to_existing_table(
     conn.close()
 
     @contextmanager
-    def isolated_db_session(immediate=False):
+    def isolated_db_session(
+        immediate=False,
+        *,
+        statement_timeout_ms=None,
+        lock_timeout_ms=None,
+    ):
         connection = sqlite3.connect(database_path, timeout=10)
         connection.row_factory = sqlite3.Row
 
@@ -980,4 +989,3 @@ def test_register_batch_rejects_invalid_state_characters(
             0,
             [municipality("4305108", state=state)],
         )
-        
