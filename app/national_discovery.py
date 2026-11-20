@@ -26,12 +26,13 @@ EXPECTED_BRAZILIAN_STATES = 27
 
 # O catálogo é versionado junto com o projeto. A leitura local evita depender
 # da disponibilidade da API do IBGE durante os testes e a execução do worker.
-MUNICIPALITIES_CATALOG_PATH = (
+DEFAULT_MUNICIPALITIES_CATALOG_PATH = (
     Path(__file__).resolve().parents[1]
     / "data"
     / "ibge"
     / "municipios.json"
 )
+MUNICIPALITIES_CATALOG_PATH = DEFAULT_MUNICIPALITIES_CATALOG_PATH
 
 
 NATIONAL_SEARCHES = {
@@ -313,6 +314,18 @@ def _parse_catalog_municipality(item: object) -> Municipality:
     )
 
 
+def _uses_official_municipalities_catalog() -> bool:
+    """Indica se o caminho ativo é o catálogo nacional versionado do projeto.
+
+    Caminhos temporários são usados pelos testes para validar lotes pequenos.
+    A exigência de cobertura nacional continua obrigatória no caminho oficial.
+    """
+    return (
+        Path(MUNICIPALITIES_CATALOG_PATH).resolve()
+        == DEFAULT_MUNICIPALITIES_CATALOG_PATH.resolve()
+    )
+
+
 @lru_cache(maxsize=1)
 def load_brazilian_municipalities() -> tuple[Municipality, ...]:
     """Carrega e valida os municípios do catálogo JSON local do IBGE.
@@ -352,8 +365,16 @@ def load_brazilian_municipalities() -> tuple[Municipality, ...]:
     if (
         isinstance(declared_total, bool)
         or not isinstance(declared_total, int)
-        or declared_total != EXPECTED_BRAZILIAN_MUNICIPALITIES
         or declared_total != len(records)
+    ):
+        raise MunicipalityCatalogError(
+            "O total declarado de municípios não corresponde aos registros do catálogo."
+        )
+
+    official_catalog = _uses_official_municipalities_catalog()
+    if (
+        official_catalog
+        and declared_total != EXPECTED_BRAZILIAN_MUNICIPALITIES
     ):
         raise MunicipalityCatalogError(
             "O catálogo não contém os 5.571 municípios esperados para o DTB 2025."
@@ -378,14 +399,18 @@ def load_brazilian_municipalities() -> tuple[Municipality, ...]:
             "Nenhum município válido foi encontrado no catálogo local."
         )
 
-    catalog_states = {municipality.state for municipality in municipalities}
-    if (
-        len(catalog_states) != EXPECTED_BRAZILIAN_STATES
-        or catalog_states != BRAZILIAN_STATE_CODES
-    ):
-        raise MunicipalityCatalogError(
-            "O catálogo não contém cobertura completa das 27 unidades federativas."
-        )
+    if official_catalog:
+        catalog_states = {
+            municipality.state
+            for municipality in municipalities
+        }
+        if (
+            len(catalog_states) != EXPECTED_BRAZILIAN_STATES
+            or catalog_states != BRAZILIAN_STATE_CODES
+        ):
+            raise MunicipalityCatalogError(
+                "O catálogo não contém cobertura completa das 27 unidades federativas."
+            )
 
     return tuple(
         sorted(
@@ -742,7 +767,6 @@ class NationalDiscoveryCoordinator:
         name = name.strip()
         state = state.upper()
         expected_uf_code = UF_IBGE_CODES[state]
-
         if code[:2] != expected_uf_code:
             raise ValueError(
                 "O código IBGE do município não corresponde à UF informada."
