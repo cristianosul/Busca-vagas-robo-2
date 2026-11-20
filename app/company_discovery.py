@@ -25,6 +25,8 @@ MAX_REDIRECTS = 5
 MAX_URL_LENGTH = 2048
 MAX_COMPANY_NAME_LENGTH = 150
 MAX_LINKS = 500
+MAX_LINK_TEXT_LENGTH = 1000
+HTML_PARSE_CHUNK_SIZE = 8192
 
 TRACKING_PARAMETERS = {
     "gclid",
@@ -74,51 +76,87 @@ class CareerPageCandidate:
 
 
 class _LinkParser(HTMLParser):
-    """Extrai links HTML, inclusive quando possuem elementos aninhados."""
+    """Extrai links sem acumular uma pilha ilimitada de âncoras."""
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.links = []
-        self.anchor_stack = []
+        self.current_anchor = None
 
-    def _save_link(self, anchor):
-        if len(self.links) >= MAX_LINKS:
+    def _save_current_anchor(self):
+        anchor = self.current_anchor
+        self.current_anchor = None
+
+        if anchor is None or len(self.links) >= MAX_LINKS:
             return
 
         href = anchor["href"]
-
         if href is None:
             return
 
         text = " ".join(" ".join(anchor["text"]).split())
-
         self.links.append((href, text))
 
     def handle_starttag(self, tag, attrs):
-        if tag.lower() == "a":
-            attributes = dict(attrs)
+        if tag.lower() != "a":
+            return
 
-            self.anchor_stack.append({
-                "href": attributes.get("href"),
-                "text": [],
-            })
+        # Âncoras HTML aninhadas são inválidas. Fecha a anterior para
+        # impedir crescimento ilimitado da pilha em HTML malformado.
+        self._save_current_anchor()
+
+        if len(self.links) >= MAX_LINKS:
+            return
+
+        attributes = dict(attrs)
+        href = attributes.get("href")
+        if href is None:
+            return
+
+        self.current_anchor = {
+            "href": href,
+            "text": [],
+            "text_length": 0,
+        }
 
     def handle_data(self, data):
-        for anchor in self.anchor_stack:
-            anchor["text"].append(data)
+        anchor = self.current_anchor
+        if anchor is None:
+            return
+
+        remaining = MAX_LINK_TEXT_LENGTH - anchor["text_length"]
+        if remaining <= 0:
+            return
+
+        fragment = data[:remaining]
+        if fragment:
+            anchor["text"].append(fragment)
+            anchor["text_length"] += len(fragment)
 
     def handle_endtag(self, tag):
-        if tag.lower() == "a" and self.anchor_stack:
-            anchor = self.anchor_stack.pop()
-            self._save_link(anchor)
+        if tag.lower() == "a":
+            self._save_current_anchor()
 
     def close(self):
         super().close()
+        # Aproveita links cujo fechamento não veio no HTML.
+        self._save_current_anchor()
 
-        # Também aproveita links cujo fechamento não veio no HTML.
-        while self.anchor_stack:
-            anchor = self.anchor_stack.pop()
-            self._save_link(anchor)
+
+def _parse_html_links(html: str, deadline: float) -> list[tuple[str, str]]:
+    """Analisa HTML em blocos, verificando o prazo entre cada bloco."""
+
+    parser = _LinkParser()
+
+    for offset in range(0, len(html), HTML_PARSE_CHUNK_SIZE):
+        _remaining_time(deadline)
+        parser.feed(html[offset:offset + HTML_PARSE_CHUNK_SIZE])
+
+    _remaining_time(deadline)
+    parser.close()
+    _remaining_time(deadline)
+
+    return parser.links
 
 
 def _canonical_hostname(host: str) -> str:
@@ -675,14 +713,12 @@ def discover_career_pages(
 
     _remaining_time(deadline)
 
-    parser = _LinkParser()
-    parser.feed(html)
-    parser.close()
+    parsed_links = _parse_html_links(html, deadline)
 
     candidates = []
     seen_urls = set()
 
-    for href, link_text in parser.links:
+    for href, link_text in parsed_links:
         _remaining_time(deadline)
 
         if not href:
