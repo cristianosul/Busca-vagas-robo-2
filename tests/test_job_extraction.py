@@ -1,6 +1,6 @@
 import pytest
 
-from job_extraction import (
+from app.job_extraction import (
     MAX_HTML_BYTES,
     MAX_DESCRIPTION_CHARS,
     extract_jobs_from_html,
