@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from app.job_extraction import (
@@ -170,7 +172,7 @@ def test_rejects_html_over_size_limit():
 
 def test_description_is_capped():
     long_description = "A" * (MAX_DESCRIPTION_CHARS + 500)
-    html = '<script type="application/ld+json">' + __import__("json").dumps({
+    html = '<script type="application/ld+json">' + json.dumps({
         "@type": "JobPosting", "title": "Vaga", "description": long_description
     }) + "</script>"
     job = extract_jobs_from_html(html, PAGE_URL)[0]
@@ -184,3 +186,139 @@ def test_rejects_candidate_url_with_credentials():
     }</script>'''
     job = extract_jobs_from_html(html, PAGE_URL)[0]
     assert job.application_urls == ()
+
+
+def test_page_level_application_links_are_not_cross_assigned_to_multiple_jobs():
+    html = '''
+    <script type="application/ld+json">[
+      {"@type":"JobPosting","title":"Vaga A","identifier":"A"},
+      {"@type":"JobPosting","title":"Vaga B","identifier":"B"}
+    ]</script>
+    <a href="/candidatar">Candidate-se</a>
+    '''
+
+    jobs = extract_jobs_from_html(html, PAGE_URL)
+
+    assert len(jobs) == 2
+    assert all(job.application_urls == () for job in jobs)
+    assert all(
+        any("não foram associados" in warning for warning in job.warnings)
+        for job in jobs
+    )
+
+
+def test_deduplicates_repeated_structured_job_with_same_identifier():
+    html = '''<script type="application/ld+json">[
+      {"@type":"JobPosting","title":"Analista","identifier":"vaga-123"},
+      {"@type":"JobPosting","title":"Analista","identifier":"vaga-123"}
+    ]</script>'''
+
+    jobs = extract_jobs_from_html(html, PAGE_URL)
+
+    assert len(jobs) == 1
+    assert jobs[0].identifier == "vaga-123"
+
+
+def test_keeps_distinct_jobs_with_different_identifiers():
+    html = '''<script type="application/ld+json">[
+      {"@type":"JobPosting","title":"Analista","identifier":"vaga-123"},
+      {"@type":"JobPosting","title":"Analista","identifier":"vaga-456"}
+    ]</script>'''
+
+    jobs = extract_jobs_from_html(html, PAGE_URL)
+
+    assert len(jobs) == 2
+    assert [job.identifier for job in jobs] == ["vaga-123", "vaga-456"]
+
+
+def test_extracts_structured_requirements_from_multiple_fields():
+    html = '''<script type="application/ld+json">{
+      "@type":"JobPosting",
+      "title":"Desenvolvedor",
+      "qualifications":["Experiência com Python", {"name":"Conhecimento de SQL"}],
+      "educationRequirements":{"description":"Ensino superior completo"},
+      "experienceRequirements":"Dois anos de experiência"
+    }</script>'''
+
+    job = extract_jobs_from_html(html, PAGE_URL)[0]
+
+    assert job.requirements is not None
+    assert "Experiência com Python" in job.requirements
+    assert "Conhecimento de SQL" in job.requirements
+    assert "Ensino superior completo" in job.requirements
+    assert "Dois anos de experiência" in job.requirements
+
+
+def test_extracts_requirements_section_from_structured_description():
+    html = '<script type="application/ld+json">' + json.dumps({
+        "@type": "JobPosting",
+        "title": "Assistente",
+        "description": (
+            "Atividades da oportunidade.\n"
+            "Requisitos:\nConhecimento de Excel\nBoa comunicação\n"
+            "Benefícios:\nVale-refeição"
+        ),
+    }) + "</script>"
+
+    job = extract_jobs_from_html(html, PAGE_URL)[0]
+
+    assert job.requirements is not None
+    assert "Conhecimento de Excel" in job.requirements
+    assert "Boa comunicação" in job.requirements
+    assert "Vale-refeição" not in job.requirements
+
+
+def test_resolves_relative_canonical_url_without_replacing_fetched_page_url():
+    html = '''<html><head>
+      <link rel="canonical" href="/carreiras/vaga-123">
+    </head><body><h1>Analista</h1></body></html>'''
+
+    job = extract_jobs_from_html(html, PAGE_URL)[0]
+
+    assert job.canonical_url == "https://empresa.example/carreiras/vaga-123"
+    assert job.page_url == PAGE_URL
+
+
+def test_limits_number_of_extracted_jobs():
+    postings = [
+        {"@type": "JobPosting", "title": f"Vaga {index}", "identifier": f"id-{index}"}
+        for index in range(60)
+    ]
+    html = '<script type="application/ld+json">' + json.dumps(postings) + "</script>"
+
+    jobs = extract_jobs_from_html(html, PAGE_URL)
+
+    assert len(jobs) == 50
+    assert jobs[0].title == "Vaga 0"
+    assert jobs[-1].title == "Vaga 49"
+
+
+def test_limits_application_urls_to_twenty_unique_links():
+    application_urls = [f"https://portal.example/apply/{index}" for index in range(25)]
+    html = '<script type="application/ld+json">' + json.dumps({
+        "@type": "JobPosting",
+        "title": "Vaga",
+        "applicationUrl": application_urls,
+    }) + "</script>"
+
+    job = extract_jobs_from_html(html, PAGE_URL)[0]
+
+    assert len(job.application_urls) == 20
+    assert job.application_urls[0] == application_urls[0]
+    assert job.application_urls[-1] == application_urls[19]
+
+
+def test_limits_number_of_jsonld_script_blocks_processed():
+    scripts = ['<script type="application/ld+json">{}</script>' for _ in range(50)]
+    scripts.append(
+        '<script type="application/ld+json">'
+        '{"@type":"JobPosting","title":"Não deve ser processada"}'
+        '</script>'
+    )
+    html = "".join(scripts) + "<h1>Vaga de fallback</h1>"
+
+    jobs = extract_jobs_from_html(html, PAGE_URL)
+
+    assert len(jobs) == 1
+    assert jobs[0].title == "Vaga de fallback"
+    assert jobs[0].structured_data_found is False
