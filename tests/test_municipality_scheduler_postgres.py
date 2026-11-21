@@ -186,6 +186,93 @@ def test_postgres_uses_an_isolated_schema(postgres_database):
     assert row["schema_name"] == postgres_database["schema"]
 
 
+def test_postgres_init_adds_lease_token_to_legacy_table(postgres_database):
+    """Migra tabela legada sem perder os municípios já registrados."""
+    created_at = "2026-01-15T12:00:00+00:00"
+    updated_at = "2026-01-15T12:30:00+00:00"
+
+    with repository.db_session() as conn:
+        conn.execute("DROP TABLE municipality_discovery")
+        conn.execute("""
+            CREATE TABLE municipality_discovery (
+                municipality_code TEXT PRIMARY KEY,
+                municipality_name TEXT NOT NULL,
+                state TEXT NOT NULL,
+                batch_index INTEGER NOT NULL CHECK(batch_index >= 0),
+                status TEXT NOT NULL DEFAULT 'pending'
+                    CHECK(status IN (
+                        'pending', 'running', 'completed', 'failed'
+                    )),
+                attempts INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        """)
+        repository.execute(
+            conn,
+            """
+            INSERT INTO municipality_discovery (
+                municipality_code, municipality_name, state, batch_index,
+                status, attempts, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "4305108",
+                "Caxias do Sul",
+                "RS",
+                7,
+                "completed",
+                2,
+                created_at,
+                updated_at,
+            ),
+        )
+
+    # A inicialização deve detectar a tabela antiga e adicionar a coluna.
+    scheduler.init_municipality_scheduler()
+
+    with repository.db_session() as conn:
+        columns = {
+            row["column_name"]
+            for row in repository.execute(
+                conn,
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_schema = current_schema()
+                  AND table_name = 'municipality_discovery'
+                """,
+            ).fetchall()
+        }
+        row = repository.execute(
+            conn,
+            """
+            SELECT municipality_code, municipality_name, state,
+                   batch_index, status, attempts, created_at, updated_at,
+                   lease_token
+            FROM municipality_discovery
+            WHERE municipality_code = ?
+            """,
+            ("4305108",),
+        ).fetchone()
+
+    assert "lease_token" in columns
+    assert row is not None
+    assert row["municipality_code"] == "4305108"
+    assert row["municipality_name"] == "Caxias do Sul"
+    assert row["state"] == "RS"
+    assert row["batch_index"] == 7
+    assert row["status"] == "completed"
+    assert row["attempts"] == 2
+    assert row["created_at"] == created_at
+    assert row["updated_at"] == updated_at
+    assert row["lease_token"] is None
+
+
 def test_postgres_scheduler_initializes_empty_batch(postgres_database):
     assert scheduler.get_batch_progress(0) == {
         "batch_index": 0,
