@@ -20,9 +20,10 @@ def make_response(url: str, status: int = 200, *, headers=None, body=b""):
 
 
 @pytest.fixture(autouse=True)
-def isolate_rate_limiter(monkeypatch):
+def isolate_rate_limiter(monkeypatch, request):
     """Evita esperas e estado compartilhado entre testes."""
-    monkeypatch.setattr(fetcher, "_wait_domain_slot", lambda *args, **kwargs: None)
+    if request.node.name != "test_rate_limiter_schedules_each_domain_independently":
+        monkeypatch.setattr(fetcher, "_wait_domain_slot", lambda *args, **kwargs: None)
     with fetcher._rate_lock:
         fetcher._next_domain_request.clear()
 
@@ -271,3 +272,51 @@ def test_request_failure_is_wrapped(monkeypatch):
             max_bytes=100,
         )
     assert exc.value.code == "network_error"
+
+
+def test_rate_limiter_schedules_each_domain_independently(monkeypatch):
+    """Um domínio não deve consumir o intervalo reservado para outro."""
+    sleeps = []
+    clock = iter([100.0, 100.0, 100.0, 100.0, 100.0])
+    monkeypatch.setattr(fetcher, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(fetcher, "sleep", sleeps.append)
+    with fetcher._rate_lock:
+        fetcher._next_domain_request.clear()
+
+    deadline = 200.0
+    fetcher._wait_domain_slot("jobs.example", deadline)
+    fetcher._wait_domain_slot("jobs.example", deadline)
+    fetcher._wait_domain_slot("careers.example", deadline)
+
+    assert sleeps == [1.0]
+    assert fetcher._next_domain_request == {
+        "jobs.example": 102.0,
+        "careers.example": 101.0,
+    }
+
+
+def test_robots_cache_reuses_policy_for_same_host(monkeypatch):
+    """A política robots já carregada deve ser reutilizada no mesmo fetch."""
+    calls = install_fake_network(
+        monkeypatch,
+        lambda url, number: make_response(
+            url,
+            headers={"content-type": "text/plain"},
+            body=b"User-agent: *\\nAllow: /\\n",
+        ),
+    )
+    cache = {}
+    client = httpx.Client()
+    deadline = fetcher.monotonic() + 10
+
+    first = fetcher._load_robots(
+        client, "https://example.com/jobs/1", deadline, cache
+    )
+    second = fetcher._load_robots(
+        client, "https://example.com/jobs/2", deadline, cache
+    )
+
+    assert first is second
+    assert len(calls) == 1
+    assert calls[0] == "https://example.com/robots.txt"
+    client.close()
