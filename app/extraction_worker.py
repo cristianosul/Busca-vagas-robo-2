@@ -73,9 +73,12 @@ def _discovery_payload(claimed: dict[str, Any]) -> tuple[dict[str, Any], str, st
     if not isinstance(result, dict):
         raise ValueError("O resultado bruto da descoberta não é um objeto.")
 
-    url = result.get("url") or discovery.get("normalized_url")
+    url = result.get("url")
+    if not isinstance(url, str) or not url.strip():
+        url = discovery.get("normalized_url")
     if not isinstance(url, str) or not url.strip():
         raise ValueError("A descoberta não contém uma URL para leitura.")
+    url = url.strip()
 
     provider = result.get("provider")
     source_name = provider.strip() if isinstance(provider, str) and provider.strip() else None
