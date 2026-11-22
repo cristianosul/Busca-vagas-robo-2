@@ -315,6 +315,28 @@ def _mode_from_job(job: dict[str, Any], description: str | None) -> str:
     return "Não informado"
 
 
+def _identifier_value(value: Any) -> str | None:
+    """Return a stable identifier, preferring PropertyValue.value over its label."""
+    candidates = value if isinstance(value, list) else [value]
+    for candidate in candidates:
+        if isinstance(candidate, dict):
+            # Schema.org PropertyValue commonly uses name as the field label
+            # (for example, "Código da vaga") and value as the actual ID.
+            for key in ("value", "@id", "name"):
+                raw = candidate.get(key)
+                if isinstance(raw, dict):
+                    cleaned = _first_text(raw, limit=500)
+                else:
+                    cleaned = _clean_text(raw, 500)
+                if cleaned:
+                    return cleaned
+        else:
+            cleaned = _clean_text(candidate, 500)
+            if cleaned:
+                return cleaned
+    return None
+
+
 def _canonical_value(value: Any, page_url: str) -> str | None:
     if isinstance(value, dict):
         value = value.get("url") or value.get("@id") or value.get("name")
@@ -356,7 +378,7 @@ def _job_from_jsonld(job: dict[str, Any], page_url: str, company_hint: str | Non
     title = _first_text(job.get("title"), job.get("name"))
     date_posted = _clean_text(job.get("datePosted"), 100)
     valid_through = _clean_text(job.get("validThrough"), 100)
-    identifier = _first_text(job.get("identifier"), limit=500)
+    identifier = _identifier_value(job.get("identifier"))
     job_url = _canonical_value(job.get("url") or job.get("mainEntityOfPage"), page_url)
     missing = tuple(name for name, value in (
         ("title", title), ("company", company), ("description", description),
@@ -383,9 +405,29 @@ def _job_from_jsonld(job: dict[str, Any], page_url: str, company_hint: str | Non
 
 def _deduplicate_jobs(jobs: list[ExtractedJob]) -> list[ExtractedJob]:
     result: list[ExtractedJob] = []
-    seen: set[tuple[str | None, str | None, str | None]] = set()
+    seen: set[tuple[Any, ...]] = set()
     for job in jobs:
-        key = (job.title, job.company, job.identifier or job.job_url)
+        stable_id = job.identifier or job.job_url
+        if stable_id:
+            key = ("stable", job.title, job.company, stable_id)
+        else:
+            # Without a publisher ID or job-specific URL, use the available
+            # vacancy content as a fingerprint. Title/company alone are not
+            # sufficient: employers often publish several roles with the
+            # same title in different locations or with different descriptions.
+            key = (
+                "content",
+                job.title,
+                job.company,
+                job.description,
+                job.requirements,
+                job.location,
+                job.mode,
+                job.employment_type,
+                job.date_posted,
+                job.valid_through,
+                job.application_urls,
+            )
         if key not in seen:
             seen.add(key)
             result.append(job)
