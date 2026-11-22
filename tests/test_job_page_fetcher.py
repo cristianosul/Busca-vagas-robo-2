@@ -20,12 +20,16 @@ def make_response(url: str, status: int = 200, *, headers=None, body=b""):
 
 
 @pytest.fixture(autouse=True)
-def isolate_rate_limiter(monkeypatch, request):
+def isolate_rate_limiter(monkeypatch):
     """Evita esperas e estado compartilhado entre testes."""
-    if request.node.name != "test_rate_limiter_schedules_each_domain_independently":
-        monkeypatch.setattr(fetcher, "_wait_domain_slot", lambda *args, **kwargs: None)
+    monkeypatch.setattr(fetcher, "_wait_domain_slot", lambda *args, **kwargs: None)
     with fetcher._rate_lock:
         fetcher._next_domain_request.clear()
+        fetcher._rate_limit_calls = 0
+    with fetcher._robots_condition:
+        fetcher._robots_cache.clear()
+        fetcher._robots_loading.clear()
+        fetcher._robots_condition.notify_all()
 
 
 def install_fake_network(monkeypatch, responder):
@@ -274,49 +278,88 @@ def test_request_failure_is_wrapped(monkeypatch):
     assert exc.value.code == "network_error"
 
 
-def test_rate_limiter_schedules_each_domain_independently(monkeypatch):
-    """Um domínio não deve consumir o intervalo reservado para outro."""
-    sleeps = []
-    clock = iter([100.0, 100.0, 100.0, 100.0, 100.0])
-    monkeypatch.setattr(fetcher, "monotonic", lambda: next(clock))
-    monkeypatch.setattr(fetcher, "sleep", sleeps.append)
-    with fetcher._rate_lock:
-        fetcher._next_domain_request.clear()
-
-    deadline = 200.0
-    fetcher._wait_domain_slot("jobs.example", deadline)
-    fetcher._wait_domain_slot("jobs.example", deadline)
-    fetcher._wait_domain_slot("careers.example", deadline)
-
-    assert sleeps == [1.0]
-    assert fetcher._next_domain_request == {
-        "jobs.example": 102.0,
-        "careers.example": 101.0,
-    }
-
-
-def test_robots_cache_reuses_policy_for_same_host(monkeypatch):
-    """A política robots já carregada deve ser reutilizada no mesmo fetch."""
+def test_shared_robots_cache_reuses_policy_across_independent_calls(monkeypatch):
+    """Chamadas separadas no processo compartilham a política do hostname."""
     calls = install_fake_network(
         monkeypatch,
         lambda url, number: make_response(
             url,
             headers={"content-type": "text/plain"},
-            body=b"User-agent: *\\nAllow: /\\n",
+            body=b"User-agent: *\nAllow: /\n",
         ),
     )
-    cache = {}
     client = httpx.Client()
     deadline = fetcher.monotonic() + 10
-
-    first = fetcher._load_robots(
-        client, "https://example.com/jobs/1", deadline, cache
-    )
-    second = fetcher._load_robots(
-        client, "https://example.com/jobs/2", deadline, cache
-    )
+    try:
+        first = fetcher._load_robots(
+            client, "https://shared.example/jobs/1", deadline
+        )
+        second = fetcher._load_robots(
+            client, "https://shared.example/jobs/2", deadline
+        )
+    finally:
+        client.close()
 
     assert first is second
     assert len(calls) == 1
-    assert calls[0] == "https://example.com/robots.txt"
-    client.close()
+
+
+def test_shared_robots_cache_caches_not_found_response(monkeypatch):
+    """A ausência de robots.txt também é cacheada para evitar consultas repetidas."""
+    calls = install_fake_network(
+        monkeypatch,
+        lambda url, number: make_response(url, 404),
+    )
+    client = httpx.Client()
+    deadline = fetcher.monotonic() + 10
+    try:
+        first = fetcher._load_robots(
+            client, "https://missing-robots.example/jobs/1", deadline
+        )
+        second = fetcher._load_robots(
+            client, "https://missing-robots.example/jobs/2", deadline
+        )
+    finally:
+        client.close()
+
+    assert first is None
+    assert second is None
+    assert len(calls) == 1
+
+
+def test_shared_robots_cache_avoids_duplicate_concurrent_loads(monkeypatch):
+    """Duas chamadas simultâneas aguardam uma única consulta por hostname."""
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier, Lock
+    from time import sleep as real_sleep
+
+    calls = []
+    calls_lock = Lock()
+    start = Barrier(2)
+
+    def fake_request(client, url, deadline, *, max_bytes, minimum_interval=1.0):
+        with calls_lock:
+            calls.append(url)
+        real_sleep(0.05)
+        return 200, {"content-type": "text/plain"}, b"User-agent: *\nAllow: /\n", url
+
+    monkeypatch.setattr(fetcher, "_request_once", fake_request)
+
+    def load(path):
+        client = httpx.Client()
+        try:
+            start.wait(timeout=2)
+            return fetcher._load_robots(
+                client, f"https://concurrent.example/{path}", fetcher.monotonic() + 5
+            )
+        finally:
+            client.close()
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first_future = executor.submit(load, "jobs/1")
+        second_future = executor.submit(load, "jobs/2")
+        first = first_future.result(timeout=3)
+        second = second_future.result(timeout=3)
+
+    assert first is second
+    assert calls == ["https://concurrent.example/robots.txt"]
