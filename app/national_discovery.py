@@ -772,6 +772,23 @@ class NationalDiscoveryCoordinator:
                 "O código IBGE do município não corresponde à UF informada."
             )
 
+        catalog_municipality = next(
+            (
+                item
+                for item in load_brazilian_municipalities()
+                if item.code == code
+            ),
+            None,
+        )
+        if (
+            catalog_municipality is None
+            or catalog_municipality.name.casefold() != name.casefold()
+            or catalog_municipality.state != state
+        ):
+            raise ValueError(
+                "O código, nome e UF do município devem corresponder ao catálogo oficial do IBGE."
+            )
+
         query = (
             "vagas de emprego empresas contratando agências de emprego "
             f"SINE {name} {state}"
