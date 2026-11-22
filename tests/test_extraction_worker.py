@@ -211,3 +211,26 @@ def test_process_claimed_extraction_rejects_invalid_lease_payload():
         worker.process_claimed_extraction({"id": 0, "lease_token": "token"})
     with pytest.raises(ValueError, match="token de lease"):
         worker.process_claimed_extraction({"id": 1, "lease_token": ""})
+
+
+@pytest.mark.parametrize(
+    "invalid_url",
+    ["   ", {"unexpected": "object"}],
+    ids=["blank-url", "non-string-url"],
+)
+def test_discovery_payload_falls_back_to_normalized_url_when_result_url_is_invalid(
+    invalid_url,
+):
+    claimed = {
+        "discovery_result": {
+            "id": 123,
+            "normalized_url": "https://empresa.example/vagas/normalized",
+            "result": {"url": invalid_url, "provider": "Página oficial"},
+        }
+    }
+
+    discovery, source_url, source_name = worker._discovery_payload(claimed)
+
+    assert discovery["id"] == 123
+    assert source_url == "https://empresa.example/vagas/normalized"
+    assert source_name == "Página oficial"
