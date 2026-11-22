@@ -322,3 +322,81 @@ def test_limits_number_of_jsonld_script_blocks_processed():
     assert len(jobs) == 1
     assert jobs[0].title == "Vaga de fallback"
     assert jobs[0].structured_data_found is False
+
+
+def test_property_value_identifier_uses_value_instead_of_shared_label():
+    postings = [
+        {
+            "@type": "JobPosting",
+            "title": "Analista",
+            "hiringOrganization": {"name": "Empresa Exemplo"},
+            "identifier": {
+                "@type": "PropertyValue",
+                "name": "Código da vaga",
+                "value": "101",
+            },
+        },
+        {
+            "@type": "JobPosting",
+            "title": "Analista",
+            "hiringOrganization": {"name": "Empresa Exemplo"},
+            "identifier": {
+                "@type": "PropertyValue",
+                "name": "Código da vaga",
+                "value": "102",
+            },
+        },
+    ]
+    html = '<script type="application/ld+json">' + json.dumps(postings) + "</script>"
+
+    jobs = extract_jobs_from_html(html, PAGE_URL)
+
+    assert len(jobs) == 2
+    assert [job.identifier for job in jobs] == ["101", "102"]
+
+
+def test_keeps_distinct_jobs_without_identifier_or_job_url_when_content_differs():
+    postings = [
+        {
+            "@type": "JobPosting",
+            "title": "Analista",
+            "hiringOrganization": {"name": "Empresa Exemplo"},
+            "description": "Analisar relatórios financeiros.",
+            "jobLocation": {"address": {"addressLocality": "Caxias do Sul"}},
+        },
+        {
+            "@type": "JobPosting",
+            "title": "Analista",
+            "hiringOrganization": {"name": "Empresa Exemplo"},
+            "description": "Analisar indicadores de logística.",
+            "jobLocation": {"address": {"addressLocality": "Porto Alegre"}},
+        },
+    ]
+    html = '<script type="application/ld+json">' + json.dumps(postings) + "</script>"
+
+    jobs = extract_jobs_from_html(html, PAGE_URL)
+
+    assert len(jobs) == 2
+    assert [job.description for job in jobs] == [
+        "Analisar relatórios financeiros.",
+        "Analisar indicadores de logística.",
+    ]
+    assert [job.location for job in jobs] == ["Caxias do Sul", "Porto Alegre"]
+
+
+def test_deduplicates_identical_jobs_without_identifier_or_job_url():
+    posting = {
+        "@type": "JobPosting",
+        "title": "Analista",
+        "hiringOrganization": {"name": "Empresa Exemplo"},
+        "description": "Analisar relatórios financeiros.",
+        "jobLocation": {"address": {"addressLocality": "Caxias do Sul"}},
+    }
+    html = '<script type="application/ld+json">' + json.dumps([posting, posting]) + "</script>"
+
+    jobs = extract_jobs_from_html(html, PAGE_URL)
+
+    assert len(jobs) == 1
+    assert jobs[0].title == "Analista"
+    assert jobs[0].description == "Analisar relatórios financeiros."
+    assert jobs[0].location == "Caxias do Sul"
