@@ -10,9 +10,10 @@ independente dessas proteções.
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from threading import Lock
+from threading import Condition, Lock
 from time import monotonic, sleep
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
@@ -38,6 +39,10 @@ MAX_ROBOTS_BYTES = 256_000
 MAX_REDIRECTS = 5
 MAX_URL_LENGTH = 2048
 MIN_DOMAIN_INTERVAL_SECONDS = 1.0
+ROBOTS_CACHE_TTL_SECONDS = 6 * 60 * 60
+MAX_ROBOTS_CACHE_ENTRIES = 2048
+RATE_LIMIT_CLEANUP_EVERY = 64
+MAX_RATE_LIMIT_ENTRIES = 4096
 REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 
@@ -67,6 +72,13 @@ class FetchedJobPage:
 # uma limitação distribuída entre máquinas exigirá armazenamento compartilhado.
 _rate_lock = Lock()
 _next_domain_request: dict[str, float] = {}
+_rate_limit_calls = 0
+
+# Cache compartilhado entre chamadas do processo. O lock/condition protege
+# tanto a validade das entradas quanto a carga única por hostname.
+_robots_condition = Condition(Lock())
+_robots_cache: OrderedDict[str, tuple[float, RobotFileParser | None]] = OrderedDict()
+_robots_loading: set[str] = set()
 
 
 def _check_url(url: str):
@@ -94,7 +106,18 @@ def _wait_domain_slot(
     now = monotonic()
     _remaining_time(deadline)
     interval = max(MIN_DOMAIN_INTERVAL_SECONDS, minimum_interval)
+    global _rate_limit_calls
     with _rate_lock:
+        _rate_limit_calls += 1
+        if (
+            _rate_limit_calls % RATE_LIMIT_CLEANUP_EVERY == 0
+            or len(_next_domain_request) >= MAX_RATE_LIMIT_ENTRIES
+        ):
+            # Entradas vencidas não precisam permanecer no dicionário. Mantém
+            # reservas futuras, inclusive as feitas por chamadas concorrentes.
+            for old_host, next_at in tuple(_next_domain_request.items()):
+                if next_at <= now:
+                    _next_domain_request.pop(old_host, None)
         scheduled = max(now, _next_domain_request.get(host, now))
         _next_domain_request[host] = scheduled + interval
     wait_seconds = max(0.0, scheduled - now)
@@ -177,16 +200,11 @@ def _robots_url(url: str) -> str:
     return urlunsplit(("https", netloc, "/robots.txt", "", ""))
 
 
-def _load_robots(
+def _load_robots_uncached(
     client: httpx.Client,
     page_url: str,
     deadline: float,
-    cache: dict[str, RobotFileParser | None],
 ) -> RobotFileParser | None:
-    host = _host_key(page_url)
-    if host in cache:
-        return cache[host]
-
     robots_url = _robots_url(page_url)
     status, headers, body, _ = _request_once(
         client,
@@ -196,7 +214,6 @@ def _load_robots(
     )
 
     if status in (404, 410):
-        cache[host] = None
         return None
     if status in (401, 403):
         raise JobPageFetchError(
@@ -226,7 +243,65 @@ def _load_robots(
     text = body.decode("utf-8", errors="replace")
     parser = RobotFileParser(robots_url)
     parser.parse(text.splitlines())
-    cache[host] = parser
+    return parser
+
+
+def _load_robots(
+    client: httpx.Client,
+    page_url: str,
+    deadline: float,
+    cache: dict[str, RobotFileParser | None] | None = None,
+) -> RobotFileParser | None:
+    """Carrega robots.txt com cache por host e evita cargas concorrentes duplicadas.
+
+    O argumento ``cache`` mantém compatibilidade com consumidores/testes que
+    desejam um cache local. Sem ele, usa o cache compartilhado do processo.
+    """
+    host = _host_key(page_url)
+    if cache is not None:
+        if host not in cache:
+            cache[host] = _load_robots_uncached(client, page_url, deadline)
+        return cache[host]
+
+    while True:
+        _remaining_time(deadline)
+        with _robots_condition:
+            cached = _robots_cache.get(host)
+            now = monotonic()
+            if cached is not None:
+                expires_at, parser = cached
+                if expires_at > now:
+                    _robots_cache.move_to_end(host)
+                    return parser
+                _robots_cache.pop(host, None)
+
+            if host not in _robots_loading:
+                _robots_loading.add(host)
+                break
+
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise JobPageFetchError(
+                    "O limite total foi excedido aguardando robots.txt.",
+                    code="deadline_exceeded",
+                )
+            _robots_condition.wait(timeout=remaining)
+
+    try:
+        parser = _load_robots_uncached(client, page_url, deadline)
+    except Exception:
+        with _robots_condition:
+            _robots_loading.discard(host)
+            _robots_condition.notify_all()
+        raise
+
+    with _robots_condition:
+        _robots_cache[host] = (monotonic() + ROBOTS_CACHE_TTL_SECONDS, parser)
+        _robots_cache.move_to_end(host)
+        while len(_robots_cache) > MAX_ROBOTS_CACHE_ENTRIES:
+            _robots_cache.popitem(last=False)
+        _robots_loading.discard(host)
+        _robots_condition.notify_all()
     return parser
 
 
@@ -234,7 +309,7 @@ def _robots_allows(
     client: httpx.Client,
     url: str,
     deadline: float,
-    cache: dict[str, RobotFileParser | None],
+    cache: dict[str, RobotFileParser | None] | None = None,
 ) -> tuple[bool, float]:
     parser = _load_robots(client, url, deadline, cache)
     if parser is None:
@@ -261,14 +336,12 @@ def _fetch_html(
 ) -> tuple[str, str, int, str, tuple[str, ...]]:
     current_url = requested_url
     redirects: list[str] = []
-    robots_cache: dict[str, RobotFileParser | None] = {}
-
     for redirect_number in range(MAX_REDIRECTS + 1):
         _remaining_time(deadline)
         _check_url(current_url)
 
         allowed, crawl_interval = _robots_allows(
-            client, current_url, deadline, robots_cache
+            client, current_url, deadline
         )
         if not allowed:
             raise JobPageFetchError(
