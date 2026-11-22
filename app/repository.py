@@ -814,10 +814,7 @@ def list_discovery_results(
     limit: int = 100,
 ):
     """Lista descobertas brutas; não as transforma em candidatas."""
-    try:
-        limit = max(1, min(int(limit), 1000))
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("limit deve ser um número inteiro.") from exc
+    limit = _positive_integer(limit, "limit", maximum=1000)
     conditions = []
     params = []
     if municipality_code is not None:
@@ -1260,6 +1257,64 @@ def _merge_unique_strings(old_values, new_values, *, limit: int = 50):
     return result
 
 
+def _resolved_missing_fields(payload: dict, missing_fields) -> list[str]:
+    """Remove da lista somente campos cuja informação já está preenchida."""
+    field_values = {
+        "title": payload.get("title"),
+        "company": payload.get("company"),
+        "description": payload.get("description"),
+        "location": payload.get("location"),
+        "employment_type": payload.get("employment_type"),
+        "date_posted": payload.get("date_posted"),
+        "valid_through": payload.get("valid_through"),
+    }
+    result = []
+    seen = set()
+    for field in missing_fields or []:
+        name = str(field).strip()
+        key = name.casefold()
+        if not name or key in seen:
+            continue
+        seen.add(key)
+        value = field_values.get(key)
+        resolved = (
+            not _is_placeholder(value)
+            if key == "company"
+            else value not in (None, "", [], {})
+        ) if key in field_values else False
+        if not resolved:
+            result.append(name)
+    return result[:30]
+
+
+def _current_extraction_warnings(warnings, payload: dict, *, limit: int = 50) -> list[str]:
+    """Descarta apenas avisos conhecidos que se tornaram obsoletos."""
+    company_known = not _is_placeholder(payload.get("company"))
+    description_known = bool(
+        isinstance(payload.get("description"), str)
+        and payload["description"].strip()
+    )
+    result = []
+    seen = set()
+    for warning in warnings or []:
+        value = str(warning).strip()
+        key = value.casefold()
+        if not value or key in seen:
+            continue
+        if company_known and "empresa não identificada" in key:
+            continue
+        if description_known and (
+            "descrição da vaga ausente" in key
+            or "descrição não encontrada" in key
+        ):
+            continue
+        seen.add(key)
+        result.append(value)
+        if len(result) >= limit:
+            break
+    return result
+
+
 def _merge_extracted_payload(old_data: dict, new_data: dict) -> dict:
     merged = dict(old_data)
     for key, new_value in new_data.items():
@@ -1268,12 +1323,10 @@ def _merge_extracted_payload(old_data: dict, new_data: dict) -> dict:
             if isinstance(new_value, str) and new_value.strip():
                 if not isinstance(old_value, str) or len(new_value.strip()) > len(old_value.strip()):
                     merged[key] = new_value
-        elif key in {"application_urls", "missing_fields", "warnings"}:
-            merged[key] = _merge_unique_strings(
-                old_value,
-                new_value,
-                limit=20 if key == "application_urls" else 50,
-            )
+        elif key == "application_urls":
+            merged[key] = _merge_unique_strings(old_value, new_value, limit=20)
+        elif key in {"missing_fields", "warnings"}:
+            merged[key] = _merge_unique_strings(old_value, new_value, limit=50)
         elif key in {"title", "location", "employment_type", "company", "company_hint"}:
             if isinstance(new_value, str) and new_value.strip():
                 old_is_placeholder = _is_placeholder(old_value)
@@ -1294,6 +1347,12 @@ def _merge_extracted_payload(old_data: dict, new_data: dict) -> dict:
             if old_value in (None, "", [], {}):
                 merged[key] = new_value
         # An extraction with missing values never erases a previous value.
+    merged["missing_fields"] = _resolved_missing_fields(
+        merged, merged.get("missing_fields", [])
+    )
+    merged["warnings"] = _current_extraction_warnings(
+        merged.get("warnings", []), merged
+    )
     return merged
 
 
@@ -1577,7 +1636,7 @@ def _merge_candidate_payload(existing_payload: dict, new_payload: dict) -> Candi
     merged = {key: value for key, value in existing_payload.items() if key in allowed}
 
     long_text_fields = {"description", "requirements"}
-    append_fields = {"application_urls", "missing_fields", "extraction_warnings"}
+    append_fields = {"application_urls"}
     url_fields = {"application_url"}
 
     for key, new_value in new_payload.items():
@@ -1593,9 +1652,9 @@ def _merge_candidate_payload(existing_payload: dict, new_payload: dict) -> Candi
                 if not isinstance(old_value, str) or len(new_value) > len(old_value):
                     merged[key] = new_value
         elif key in append_fields:
-            merged[key] = _merge_unique_strings(
-                old_value, new_value, limit=50 if key != "application_urls" else 20
-            )
+            merged[key] = _merge_unique_strings(old_value, new_value, limit=20)
+        elif key in {"missing_fields", "extraction_warnings"}:
+            merged[key] = _merge_unique_strings(old_value, new_value, limit=50)
         elif key in url_fields:
             if new_value:
                 merged[key] = new_value
@@ -1622,6 +1681,13 @@ def _merge_candidate_payload(existing_payload: dict, new_payload: dict) -> Candi
         elif new_value not in (None, "", [], {}):
             if old_value in (None, "", [], {}):
                 merged[key] = new_value
+
+    merged["missing_fields"] = _resolved_missing_fields(
+        merged, merged.get("missing_fields", [])
+    )
+    merged["extraction_warnings"] = _current_extraction_warnings(
+        merged.get("extraction_warnings", []), merged
+    )
 
     # Reconstroi o modelo para sincronizar application_url/application_urls e
     # garantir que a mesclagem ainda respeite todas as validações de CandidateIn.
@@ -1803,10 +1869,7 @@ def get_source_record(source_id: str):
 
 
 def list_sources(enabled_only: bool = False, limit: int = 500):
-    try:
-        limit = max(1, min(int(limit), 500))
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("limit deve ser um número inteiro.") from exc
+    limit = _positive_integer(limit, "limit", maximum=500)
     with db_session() as conn:
         if enabled_only:
             rows = execute(
@@ -1840,10 +1903,7 @@ def update_source_status(source_id: str, enabled: bool):
 
 def list_candidates(status: str | None = None, limit: int = 50):
     """Lista candidatas e seus dados completos de extração e evidência."""
-    try:
-        limit = max(1, min(int(limit), 500))
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError("limit deve ser um número inteiro.") from exc
+    limit = _positive_integer(limit, "limit", maximum=500)
     if status is not None and status not in CANDIDATE_STATUSES:
         raise ValueError("Status de candidata inválido.")
     with db_session() as conn:
