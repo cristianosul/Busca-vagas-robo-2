@@ -966,6 +966,8 @@ def test_tries_next_validated_ip_when_first_connection_times_out(
     assert attempted_ips == [
         "1.1.1.1",
         "93.184.216.34",
+        "1.1.1.1",
+        "93.184.216.34",
     ]
 
     assert any(
