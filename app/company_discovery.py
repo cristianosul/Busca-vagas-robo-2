@@ -1,4 +1,3 @@
-
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from urllib.parse import (
@@ -32,7 +31,7 @@ HTML_PARSE_CHUNK_SIZE = 8192
 MIN_DOMAIN_REQUEST_INTERVAL = 1.0
 
 _DOMAIN_RATE_LOCK = threading.Lock()
-_DOMAIN_NEXT_REQUEST = {}
+_DOMAIN_LAST_REQUEST = {}
 
 TRACKING_PARAMETERS = {
     "gclid",
@@ -75,30 +74,35 @@ def _remaining_time(deadline: float) -> float:
 
 
 def _wait_for_domain_rate_limit(host: str, deadline: float) -> None:
-    """Serializa requisições por domínio para evitar acesso excessivo."""
+    """Serializa requisições por domínio sem reservar horários futuros."""
 
     host = _canonical_hostname(host)
-    now = time.monotonic()
 
+    # O lock permanece durante a espera para que duas threads não iniciem
+    # requisições simultâneas ao mesmo domínio.
     with _DOMAIN_RATE_LOCK:
-        scheduled_at = max(
-            now,
-            _DOMAIN_NEXT_REQUEST.get(host, now),
-        )
-        _DOMAIN_NEXT_REQUEST[host] = (
-            scheduled_at + MIN_DOMAIN_REQUEST_INTERVAL
-        )
+        now = time.monotonic()
+        last_request = _DOMAIN_LAST_REQUEST.get(host)
 
-    delay = scheduled_at - now
-    if delay > 0:
-        if delay >= _remaining_time(deadline):
-            raise TimeoutError(
-                "O limite de tempo foi excedido aguardando o intervalo "
-                "de segurança do domínio."
+        delay = 0.0
+        if last_request is not None:
+            delay = max(
+                0.0,
+                MIN_DOMAIN_REQUEST_INTERVAL - (now - last_request),
             )
-        time.sleep(delay)
 
-    _remaining_time(deadline)
+        if delay > 0:
+            if delay >= _remaining_time(deadline):
+                raise TimeoutError(
+                    "O limite de tempo foi excedido aguardando o intervalo "
+                    "de segurança do domínio."
+                )
+            time.sleep(delay)
+
+        _remaining_time(deadline)
+        # Registra somente quando a requisição está prestes a começar.
+        # Uma espera cancelada/expirada não deixa reserva pendente.
+        _DOMAIN_LAST_REQUEST[host] = time.monotonic()
 
 
 def _fetch_robots_policy(
@@ -119,14 +123,16 @@ def _fetch_robots_policy(
         "",
     ))
 
+    # Argumentos posicionais mantêm compatibilidade com mocks simples
+    # usados nos testes, sem alterar a política aplicada à requisição.
     robots_text, _ = _fetch_checked_html(
         client,
         robots_url,
         official_host,
         deadline,
-        expected_content_type=None,
-        allow_missing=True,
-        dns_cache=dns_cache,
+        None,
+        True,
+        dns_cache,
     )
 
     parser = RobotFileParser()
@@ -568,10 +574,14 @@ def _send_to_validated_ips(
 ):
     """Tenta os IPs públicos previamente validados."""
 
+    # O intervalo é aplicado uma vez por requisição lógica, não uma vez
+    # para cada IP de fallback. Assim, falhas de conexão não geram espera
+    # artificial entre tentativas da mesma requisição.
+    _wait_for_domain_rate_limit(host, deadline)
+
     last_error = None
 
     for ip in validated_ips:
-        _wait_for_domain_rate_limit(host, deadline)
         remaining = _remaining_time(deadline)
 
         pinned_url = _url_with_pinned_ip(url, ip)
