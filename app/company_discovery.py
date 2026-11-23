@@ -11,6 +11,8 @@ from urllib.parse import (
 from contextlib import closing
 import ipaddress
 import time
+import threading
+from urllib.robotparser import RobotFileParser
 
 import dns.exception
 import dns.resolver
@@ -27,6 +29,10 @@ MAX_COMPANY_NAME_LENGTH = 150
 MAX_LINKS = 500
 MAX_LINK_TEXT_LENGTH = 1000
 HTML_PARSE_CHUNK_SIZE = 8192
+MIN_DOMAIN_REQUEST_INTERVAL = 1.0
+
+_DOMAIN_RATE_LOCK = threading.Lock()
+_DOMAIN_NEXT_REQUEST = {}
 
 TRACKING_PARAMETERS = {
     "gclid",
@@ -66,6 +72,67 @@ def _remaining_time(deadline: float) -> float:
         )
 
     return remaining
+
+
+def _wait_for_domain_rate_limit(host: str, deadline: float) -> None:
+    """Serializa requisições por domínio para evitar acesso excessivo."""
+
+    host = _canonical_hostname(host)
+    now = time.monotonic()
+
+    with _DOMAIN_RATE_LOCK:
+        scheduled_at = max(
+            now,
+            _DOMAIN_NEXT_REQUEST.get(host, now),
+        )
+        _DOMAIN_NEXT_REQUEST[host] = (
+            scheduled_at + MIN_DOMAIN_REQUEST_INTERVAL
+        )
+
+    delay = scheduled_at - now
+    if delay > 0:
+        if delay >= _remaining_time(deadline):
+            raise TimeoutError(
+                "O limite de tempo foi excedido aguardando o intervalo "
+                "de segurança do domínio."
+            )
+        time.sleep(delay)
+
+    _remaining_time(deadline)
+
+
+def _fetch_robots_policy(
+    client: httpx.Client,
+    official_url: str,
+    official_host: str,
+    deadline: float,
+    dns_cache: dict[str, list[str]],
+) -> RobotFileParser:
+    """Obtém e interpreta robots.txt; falhas não-404 bloqueiam a coleta."""
+
+    parsed = urlsplit(official_url)
+    robots_url = urlunsplit((
+        parsed.scheme,
+        parsed.netloc,
+        "/robots.txt",
+        "",
+        "",
+    ))
+
+    robots_text, _ = _fetch_checked_html(
+        client,
+        robots_url,
+        official_host,
+        deadline,
+        expected_content_type=None,
+        allow_missing=True,
+        dns_cache=dns_cache,
+    )
+
+    parser = RobotFileParser()
+    parser.set_url(robots_url)
+    parser.parse(robots_text.splitlines())
+    return parser
 
 
 @dataclass(frozen=True)
@@ -504,6 +571,7 @@ def _send_to_validated_ips(
     last_error = None
 
     for ip in validated_ips:
+        _wait_for_domain_rate_limit(host, deadline)
         remaining = _remaining_time(deadline)
 
         pinned_url = _url_with_pinned_ip(url, ip)
@@ -546,6 +614,10 @@ def _fetch_checked_html(
     initial_url: str,
     official_host: str,
     deadline: float,
+    expected_content_type: str | None = "text/html",
+    allow_missing: bool = False,
+    dns_cache: dict[str, list[str]] | None = None,
+    robots_policy: RobotFileParser | None = None,
 ) -> tuple[str, str]:
     """
     Busca HTML seguindo redirecionamentos manualmente.
@@ -563,12 +635,25 @@ def _fetch_checked_html(
         parsed = _validate_public_https_url(current_url)
         host = _canonical_hostname(parsed.hostname)
 
+        if (
+            robots_policy is not None
+            and not robots_policy.can_fetch(USER_AGENT, current_url)
+        ):
+            raise ValueError(
+                "O robots.txt não permite acessar este endereço."
+            )
+
         if not _allowed_redirect_host(host, official_host):
             raise ValueError(
                 "Redirecionamento para domínio não autorizado."
             )
 
-        validated_ips = _validate_public_dns(host, deadline)
+        if dns_cache is not None and host in dns_cache:
+            validated_ips = dns_cache[host]
+        else:
+            validated_ips = _validate_public_dns(host, deadline)
+            if dns_cache is not None:
+                dns_cache[host] = validated_ips
 
         with closing(
             _send_to_validated_ips(
@@ -613,6 +698,9 @@ def _fetch_checked_html(
                 current_url = next_url
                 continue
 
+            if allow_missing and response.status_code in (404, 410):
+                return "", current_url
+
             response.raise_for_status()
 
             _remaining_time(deadline)
@@ -622,7 +710,10 @@ def _fetch_checked_html(
                 "",
             ).lower()
 
-            if "text/html" not in content_type:
+            if (
+                expected_content_type is not None
+                and expected_content_type not in content_type
+            ):
                 raise ValueError(
                     "O endereço não retornou uma página HTML."
                 )
@@ -696,6 +787,8 @@ def discover_career_pages(
         "Accept": "text/html",
     }
 
+    dns_cache: dict[str, list[str]] = {}
+
     with httpx.Client(
         timeout=REQUEST_TIMEOUT,
         follow_redirects=False,
@@ -704,11 +797,24 @@ def discover_career_pages(
         verify=True,
     ) as client:
 
+        robots = _fetch_robots_policy(
+            client,
+            official_site_url,
+            official_host,
+            deadline,
+            dns_cache,
+        )
+
+        if not robots.can_fetch(USER_AGENT, official_site_url):
+            return []
+
         html, final_url = _fetch_checked_html(
             client,
             official_site_url,
             official_host,
             deadline,
+            dns_cache=dns_cache,
+            robots_policy=robots,
         )
 
     _remaining_time(deadline)
