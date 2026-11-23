@@ -823,8 +823,10 @@ def discover_career_pages(
             official_site_url,
             official_host,
             deadline,
-            dns_cache=dns_cache,
-            robots_policy=robots,
+            "text/html",
+            False,
+            dns_cache,
+            robots,
         )
 
     _remaining_time(deadline)
